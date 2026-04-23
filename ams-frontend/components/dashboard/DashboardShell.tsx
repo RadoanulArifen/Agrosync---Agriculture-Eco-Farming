@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { cn, getInitials } from '@/utils';
 import { DASHBOARD_NOTIFICATION_ROUTES, DASHBOARD_PROFILE_ROUTES } from '@/constants';
-import { authService } from '@/services';
+import { authService, notificationService } from '@/services';
 
 export interface NavItem {
   href: string;
@@ -31,6 +31,7 @@ export default function DashboardShell({
 }: DashboardShellProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [liveNotificationCount, setLiveNotificationCount] = useState(notificationCount);
   const pathname = usePathname();
   const router = useRouter();
   const profileHref = DASHBOARD_PROFILE_ROUTES[role as keyof typeof DASHBOARD_PROFILE_ROUTES] || '/';
@@ -56,6 +57,44 @@ export default function DashboardShell({
   const [subtitleLabel, subtitleValue] = userSubtitle.includes(':')
     ? userSubtitle.split(/:\s(.+)/)
     : ['Profile', userSubtitle];
+
+  useEffect(() => {
+    const currentUser = role === 'farmer' ? authService.getCurrentFarmer() : authService.getCurrentUser();
+
+    if (!currentUser?.id) {
+      setLiveNotificationCount(notificationCount);
+      return;
+    }
+
+    const syncNotificationCount = () => {
+      notificationService.getNotifications(currentUser.id)
+        .then((notifications) => {
+          setLiveNotificationCount(notifications.filter((item) => !item.isRead).length);
+        })
+        .catch(() => setLiveNotificationCount(notificationCount));
+    };
+
+    syncNotificationCount();
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key && event.key !== 'ams_notifications') return;
+      syncNotificationCount();
+    };
+
+    const handleNotificationsUpdated = () => {
+      syncNotificationCount();
+    };
+
+    window.addEventListener('storage', handleStorage);
+    window.addEventListener('focus', handleNotificationsUpdated);
+    window.addEventListener('ams:notifications-updated', handleNotificationsUpdated);
+
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('focus', handleNotificationsUpdated);
+      window.removeEventListener('ams:notifications-updated', handleNotificationsUpdated);
+    };
+  }, [notificationCount, role]);
 
   const Sidebar = (
     <div className="flex flex-col h-full bg-white border-r border-gray-100">
@@ -168,9 +207,9 @@ export default function DashboardShell({
             {/* Notification bell */}
             <Link href={notificationHref} className="relative p-2 hover:bg-gray-100 rounded-xl">
               <Bell className="w-5 h-5 text-gray-600" />
-              {notificationCount > 0 && (
+              {liveNotificationCount > 0 && (
                 <span className="absolute top-1 right-1 min-w-4 h-4 px-1 bg-red-500 text-white text-[11px] font-bold rounded-full flex items-center justify-center">
-                  {notificationCount}
+                  {liveNotificationCount}
                 </span>
               )}
             </Link>

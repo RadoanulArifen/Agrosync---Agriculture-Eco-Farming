@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Bell } from 'lucide-react';
+import { Bell, CheckCheck } from 'lucide-react';
 import DashboardShell from '@/components/dashboard/DashboardShell';
-import { Card, EmptyState, PageHeader } from '@/components/dashboard/DashboardComponents';
+import { Card, EmptyState, PageHeader, SectionHeader } from '@/components/dashboard/DashboardComponents';
 import { FARMER_NAV_ITEMS, useFarmerContext } from '@/components/dashboard/useFarmerContext';
 import { notificationService } from '@/services';
 import type { Notification } from '@/types';
@@ -12,11 +12,33 @@ import { formatDateTime } from '@/utils';
 export default function FarmerNotificationsPage() {
   const { farmer, unreadNotifications, loading } = useFarmerContext();
   const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [markingAll, setMarkingAll] = useState(false);
+
+  const loadNotifications = async (farmerId: string) => {
+    const nextNotifications = await notificationService.getNotifications(farmerId);
+    setNotifications(nextNotifications);
+    return nextNotifications;
+  };
 
   useEffect(() => {
     if (!farmer) return;
-    notificationService.getNotifications(farmer.id).then(setNotifications);
+
+    loadNotifications(farmer.id).then(async (nextNotifications) => {
+      if (nextNotifications.some((notification) => !notification.isRead)) {
+        await notificationService.markAllAsRead(farmer.id);
+        await loadNotifications(farmer.id);
+      }
+    });
   }, [farmer]);
+
+  const handleMarkAllAsDone = async () => {
+    if (!farmer || unreadNotifications === 0) return;
+
+    setMarkingAll(true);
+    await notificationService.markAllAsRead(farmer.id);
+    await loadNotifications(farmer.id);
+    setMarkingAll(false);
+  };
 
   if (loading || !farmer) {
     return (
@@ -29,6 +51,21 @@ export default function FarmerNotificationsPage() {
   return (
     <DashboardShell navItems={FARMER_NAV_ITEMS} role="farmer" userName={farmer.name} userSubtitle={`FID: ${farmer.fid}`} notificationCount={unreadNotifications}>
       <PageHeader title="Notifications" subtitle="Recent alerts, advisory updates, and platform messages" />
+
+      <Card className="mb-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <SectionHeader title="Inbox" subtitle={unreadNotifications > 0 ? `${unreadNotifications} unread notification${unreadNotifications > 1 ? 's' : ''}` : 'All notifications are up to date'} />
+          <button
+            type="button"
+            onClick={handleMarkAllAsDone}
+            disabled={markingAll || unreadNotifications === 0}
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 transition hover:border-forest hover:text-forest disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <CheckCheck className="h-4 w-4" />
+            {markingAll ? 'Updating...' : 'Mark all as done'}
+          </button>
+        </div>
+      </Card>
 
       {notifications.length === 0 ? (
         <Card>

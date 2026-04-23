@@ -6,9 +6,9 @@ import type { NavItem } from '@/components/dashboard/DashboardShell';
 
 export const OFFICER_NAV_ITEMS: NavItem[] = [
   { href: '/dashboard/officer', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/dashboard/officer/cases', label: 'Advisory Cases', icon: MessageSquare, badge: 3 },
+  { href: '/dashboard/officer/cases', label: 'Advisory Cases', icon: MessageSquare },
   { href: '/dashboard/officer/map', label: 'Regional Map', icon: Map },
-  { href: '/dashboard/officer/notifications', label: 'Alerts', icon: Bell, badge: 1 },
+  { href: '/dashboard/officer/notifications', label: 'Alerts', icon: Bell },
   { href: '/dashboard/officer/profile', label: 'My Profile', icon: User },
   { href: '/dashboard/officer/settings', label: 'Settings', icon: Settings },
 ];

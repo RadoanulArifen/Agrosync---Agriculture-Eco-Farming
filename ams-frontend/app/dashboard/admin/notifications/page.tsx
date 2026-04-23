@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle, Bell, CreditCard, ShieldAlert,
+  AlertTriangle, Bell, CheckCheck, CreditCard, ShieldAlert,
 } from 'lucide-react';
 import DashboardShell from '@/components/dashboard/DashboardShell';
 import {
@@ -18,11 +18,27 @@ export default function AdminNotificationsPage() {
   const { user, notificationCount } = useRoleUserContext({ role: 'admin', fallbackUser: ADMIN_FALLBACK_USER });
   const [systemNotifications, setSystemNotifications] = useState<Notification[]>([]);
   const [activeCases, setActiveCases] = useState(0);
+  const [markingAll, setMarkingAll] = useState(false);
+
+  const loadNotifications = async () => {
+    const nextNotifications = await notificationService.getNotifications(user.id);
+    setSystemNotifications(nextNotifications);
+    return nextNotifications;
+  };
 
   useEffect(() => {
-    notificationService.getNotifications(user.id).then(setSystemNotifications);
+    loadNotifications();
     adminService.getStats().then((stats) => setActiveCases(stats.activeAdvisories));
   }, [user.id]);
+
+  const handleMarkAllAsDone = async () => {
+    if (notificationCount === 0) return;
+
+    setMarkingAll(true);
+    await notificationService.markAllAsRead(user.id);
+    await loadNotifications();
+    setMarkingAll(false);
+  };
 
   const alerts = useMemo(() => {
     const platformAlerts = [
@@ -77,12 +93,23 @@ export default function AdminNotificationsPage() {
       role="admin"
       userName={user.name}
       userSubtitle={user.designation || 'Platform Administrator'}
-      notificationCount={notificationCount || alerts.length}
+      notificationCount={notificationCount}
     >
       <PageHeader title="Notifications" subtitle="Platform alerts, security watch items, and admin-level system updates" />
 
       <Card className="mb-6">
-        <SectionHeader title="Alert Summary" subtitle="Admin notification center" />
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <SectionHeader title="Alert Summary" subtitle={notificationCount > 0 ? `${notificationCount} unread system notification${notificationCount > 1 ? 's' : ''}` : 'System notifications are up to date'} />
+          <button
+            type="button"
+            onClick={handleMarkAllAsDone}
+            disabled={markingAll || notificationCount === 0}
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 transition hover:border-forest hover:text-forest disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <CheckCheck className="h-4 w-4" />
+            {markingAll ? 'Updating...' : 'Mark all as done'}
+          </button>
+        </div>
         <div className="grid gap-4 md:grid-cols-3">
           <div className="rounded-2xl bg-amber-50 p-4">
             <div className="text-xs text-amber-600">Active Cases</div>

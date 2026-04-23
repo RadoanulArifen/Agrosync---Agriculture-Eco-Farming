@@ -23,6 +23,7 @@ const delay = (ms = 500) => new Promise((res) => setTimeout(res, ms));
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') || '';
 const API_V1 = API_BASE_URL ? `${API_BASE_URL}/api/v1` : '';
+const NOTIFICATIONS_UPDATED_EVENT = 'ams:notifications-updated';
 
 async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!API_V1) {
@@ -441,6 +442,7 @@ const writeNotificationsStore = (notifications: Notification[]) => {
   notificationsStore = notifications;
   if (canUseStorage()) {
     window.localStorage.setItem(NOTIFICATIONS_STORAGE_KEY, JSON.stringify(notificationsStore));
+    window.dispatchEvent(new CustomEvent(NOTIFICATIONS_UPDATED_EVENT));
   }
 };
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle, Bell, CreditCard,
+  AlertTriangle, Bell, CheckCheck, CreditCard,
 } from 'lucide-react';
 import DashboardShell from '@/components/dashboard/DashboardShell';
 import {
@@ -10,21 +10,39 @@ import {
 } from '@/components/dashboard/DashboardComponents';
 import { useRoleUserContext } from '@/components/dashboard/useRoleUserContext';
 import { VENDOR_FALLBACK_USER, VENDOR_NAV_ITEMS } from '@/components/dashboard/vendorConfig';
-import { orderService, productService } from '@/services';
-import type { Order, Product } from '@/types';
+import { notificationService, orderService, productService } from '@/services';
+import type { Notification, Order, Product } from '@/types';
 import { formatBDT, formatDateTime } from '@/utils';
 
 const VENDOR_ID = 'vnd_001';
 
 export default function VendorNotificationsPage() {
-  const { user } = useRoleUserContext({ role: 'vendor', fallbackUser: VENDOR_FALLBACK_USER });
+  const { user, notificationCount } = useRoleUserContext({ role: 'vendor', fallbackUser: VENDOR_FALLBACK_USER });
   const [orders, setOrders] = useState<Order[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [systemNotifications, setSystemNotifications] = useState<Notification[]>([]);
+  const [markingAll, setMarkingAll] = useState(false);
+
+  const loadNotifications = async () => {
+    const nextNotifications = await notificationService.getNotifications(user.id);
+    setSystemNotifications(nextNotifications);
+    return nextNotifications;
+  };
 
   useEffect(() => {
+    loadNotifications();
     productService.getProducts(undefined, VENDOR_ID).then(setProducts);
     orderService.getOrders().then((data) => setOrders(data.filter((order) => order.vendorId === VENDOR_ID)));
-  }, []);
+  }, [user.id]);
+
+  const handleMarkAllAsDone = async () => {
+    if (notificationCount === 0) return;
+
+    setMarkingAll(true);
+    await notificationService.markAllAsRead(user.id);
+    await loadNotifications();
+    setMarkingAll(false);
+  };
 
   const alerts = useMemo(() => {
     const newOrderAlerts = orders
@@ -60,8 +78,17 @@ export default function VendorNotificationsPage() {
         createdAt: order.placedAt,
       }));
 
-    return [...newOrderAlerts, ...lowStockAlerts, ...paymentAlerts].slice(0, 8);
-  }, [orders, products]);
+    const mappedSystem = systemNotifications.map((notification) => ({
+      id: notification.id,
+      title: notification.title,
+      message: notification.message,
+      icon: Bell,
+      color: notification.isRead ? 'border-gray-100 bg-gray-50 text-gray-700' : 'border-blue-100 bg-blue-50 text-blue-700',
+      createdAt: notification.createdAt,
+    }));
+
+    return [...mappedSystem, ...newOrderAlerts, ...lowStockAlerts, ...paymentAlerts].slice(0, 8);
+  }, [orders, products, systemNotifications]);
 
   return (
     <DashboardShell
@@ -69,12 +96,23 @@ export default function VendorNotificationsPage() {
       role="vendor"
       userName={user.companyName || user.name}
       userSubtitle={user.designation || 'Verified Vendor'}
-      notificationCount={alerts.length}
+      notificationCount={notificationCount}
     >
       <PageHeader title="Alerts" subtitle="New order alerts, low stock warnings, and payment updates for your shop" />
 
       <Card className="mb-6">
-        <SectionHeader title="Alert Summary" subtitle="Notification system overview" />
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <SectionHeader title="Alert Summary" subtitle={notificationCount > 0 ? `${notificationCount} unread system notification${notificationCount > 1 ? 's' : ''}` : 'System notifications are up to date'} />
+          <button
+            type="button"
+            onClick={handleMarkAllAsDone}
+            disabled={markingAll || notificationCount === 0}
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 transition hover:border-forest hover:text-forest disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <CheckCheck className="h-4 w-4" />
+            {markingAll ? 'Updating...' : 'Mark all as done'}
+          </button>
+        </div>
         <div className="grid gap-4 md:grid-cols-3">
           <div className="rounded-2xl bg-blue-50 p-4">
             <div className="text-xs text-blue-600">New Orders</div>
