@@ -27,11 +27,29 @@ export default function OfficerCaseBoard({
   const [message, setMessage] = useState('');
 
   const loadCases = async () => {
-    const nextCases = await advisoryService.getOfficerCases(user.officerId || user.id);
+    const allCases = await advisoryService.getAdvisoryCases();
+    const nextCases = allCases.filter((caseItem) => (
+      caseItem.status === 'pending'
+      || caseItem.status === 'assigned'
+      || caseItem.status === 'ai_analyzed'
+      || caseItem.officerId === user.id
+      || caseItem.officerId === user.officerId
+    ));
     setCases(nextCases);
-    if (!activeCase && nextCases[0]) {
-      setActiveCase(nextCases[0]);
-    }
+
+    const nextPendingCases = nextCases.filter((caseItem) => (
+      caseItem.status === 'pending'
+      || caseItem.status === 'assigned'
+      || caseItem.status === 'ai_analyzed'
+    ));
+
+    setActiveCase((currentActiveCase) => {
+      if (!currentActiveCase) {
+        return nextPendingCases[0] ?? null;
+      }
+
+      return nextPendingCases.find((caseItem) => caseItem.id === currentActiveCase.id) ?? null;
+    });
   };
 
   useEffect(() => {
@@ -42,11 +60,21 @@ export default function OfficerCaseBoard({
     () => cases.filter((c) => c.status === 'pending' || c.status === 'assigned' || c.status === 'ai_analyzed'),
     [cases],
   );
-  const responded = useMemo(() => cases.filter((c) => c.status === 'responded'), [cases]);
+  const responded = useMemo(
+    () => cases.filter((c) => (
+      c.status === 'responded'
+      && (c.officerId === user.id || c.officerId === user.officerId)
+    )),
+    [cases, user.id, user.officerId],
+  );
+  const respondedCount = useMemo(
+    () => new Set([...responded.map((c) => c.id), ...Array.from(respondedIds)]).size,
+    [responded, respondedIds],
+  );
 
   useEffect(() => {
-    onCountsChange?.({ pending: pending.length, responded: responded.length + respondedIds.size });
-  }, [onCountsChange, pending.length, responded.length, respondedIds.size]);
+    onCountsChange?.({ pending: pending.length, responded: respondedCount });
+  }, [onCountsChange, pending.length, respondedCount]);
 
   const handleRespond = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -58,8 +86,8 @@ export default function OfficerCaseBoard({
     setRespondedIds((prev) => new Set([...Array.from(prev), activeCase.id]));
     setResponse('');
     setMessage(`Response sent for ${activeCase.id}`);
-    await loadCases();
     setActiveCase(null);
+    await loadCases();
   };
 
   return (

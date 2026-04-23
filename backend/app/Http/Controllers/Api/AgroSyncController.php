@@ -177,13 +177,13 @@ class AgroSyncController extends Controller
         return $record;
     }
 
-    private function verifiedRegistrationOtp(Request $request): ?object
+    private function verifiedRegistrationOtp(Request $request, string $role): ?object
     {
         return DB::table('auth_otps')
             ->where('token', (string) $request->input('registrationOtpToken'))
             ->where('purpose', 'registration')
             ->where('email', $this->normalizedEmail($request->input('email')))
-            ->where('role', 'farmer')
+            ->where('role', $role)
             ->whereNotNull('consumed_at')
             ->where('expires_at', '>', now())
             ->first();
@@ -577,8 +577,8 @@ class AgroSyncController extends Controller
         $email = $this->normalizedEmail($request->input('email'));
 
         if ($purpose === 'registration') {
-            if ($role !== 'farmer') {
-                return $this->ok(['success' => false, 'message' => 'Registration OTP is enabled for farmer accounts only.']);
+            if (! in_array($role, ['farmer', 'officer'], true)) {
+                return $this->ok(['success' => false, 'message' => 'Registration OTP is enabled for farmer and officer accounts only.']);
             }
 
             if ($email === '' || ! str_contains($email, '@')) {
@@ -592,8 +592,8 @@ class AgroSyncController extends Controller
             $recipient = (object) [
                 'public_id' => null,
                 'email' => $email,
-                'role' => 'farmer',
-                'name' => (string) $request->input('name', 'Farmer'),
+                'role' => $role,
+                'name' => (string) $request->input('name', $role === 'officer' ? 'Officer' : 'Farmer'),
             ];
         } else {
             $recipient = DB::table('users')
@@ -654,8 +654,8 @@ class AgroSyncController extends Controller
         $role = $request->input('role', 'farmer');
         $verifiedRegistrationOtp = null;
 
-        if ($role === 'farmer') {
-            $verifiedRegistrationOtp = $this->verifiedRegistrationOtp($request);
+        if (in_array($role, ['farmer', 'officer'], true)) {
+            $verifiedRegistrationOtp = $this->verifiedRegistrationOtp($request, $role);
 
             if (! $verifiedRegistrationOtp) {
                 return $this->ok(['success' => false, 'message' => 'Please verify the registration OTP sent to your email before submitting.']);

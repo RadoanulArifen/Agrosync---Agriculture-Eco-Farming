@@ -260,6 +260,18 @@ let tenantsStore: Tenant[] = [...MOCK_TENANTS];
 
 const canUseStorage = () => typeof window !== 'undefined';
 
+const persistStorageItem = (key: string, value: string, label: string) => {
+  if (!canUseStorage()) return false;
+
+  try {
+    window.localStorage.setItem(key, value);
+    return true;
+  } catch (error) {
+    console.warn(`[MOCK] Failed to persist ${label} to localStorage. Falling back to in-memory state.`, error);
+    return false;
+  }
+};
+
 export const DEMO_CREDENTIALS: Record<ManagedUserRole, { email: string; password: string; label: string }> = {
   admin: { email: 'admin@ams.com.bd', password: 'password123', label: 'Admin' },
   officer: { email: 'rahim@dae.gov.bd', password: 'password123', label: 'Officer' },
@@ -390,7 +402,7 @@ const readRoleUsersStore = (): DashboardRoleUser[] => {
 const writeRoleUsersStore = (users: DashboardRoleUser[]) => {
   roleUsersStore = users;
   if (canUseStorage()) {
-    window.localStorage.setItem(ROLE_USERS_STORAGE_KEY, JSON.stringify(roleUsersStore));
+    persistStorageItem(ROLE_USERS_STORAGE_KEY, JSON.stringify(roleUsersStore), 'role users store');
   }
   syncFarmersFromRoleUsers(roleUsersStore);
 };
@@ -416,7 +428,7 @@ const readAdvisoryCasesStore = (): AdvisoryCase[] => {
 const writeAdvisoryCasesStore = (cases: AdvisoryCase[]) => {
   advisoryCasesStore = cases;
   if (canUseStorage()) {
-    window.localStorage.setItem(ADVISORY_CASES_STORAGE_KEY, JSON.stringify(advisoryCasesStore));
+    persistStorageItem(ADVISORY_CASES_STORAGE_KEY, JSON.stringify(advisoryCasesStore), 'advisory cases store');
   }
 };
 
@@ -441,7 +453,7 @@ const readNotificationsStore = (): Notification[] => {
 const writeNotificationsStore = (notifications: Notification[]) => {
   notificationsStore = notifications;
   if (canUseStorage()) {
-    window.localStorage.setItem(NOTIFICATIONS_STORAGE_KEY, JSON.stringify(notificationsStore));
+    persistStorageItem(NOTIFICATIONS_STORAGE_KEY, JSON.stringify(notificationsStore), 'notifications store');
     window.dispatchEvent(new CustomEvent(NOTIFICATIONS_UPDATED_EVENT));
   }
 };
@@ -1095,7 +1107,7 @@ export const authService = {
       return { success: false, message: 'This email is already registered for another account.' };
     }
 
-    if (data.role === 'farmer') {
+    if (data.role === 'farmer' || data.role === 'officer') {
       const session = readMockOtpSession();
       if (!data.registrationOtpToken || !session?.otpToken || session.otpToken !== data.registrationOtpToken || session.purpose !== 'registration') {
         return { success: false, message: 'Please verify the registration OTP sent to your email before submitting.' };

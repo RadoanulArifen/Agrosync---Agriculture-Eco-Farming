@@ -8,8 +8,19 @@ import { authService, DEMO_CREDENTIALS } from '@/services';
 import { DASHBOARD_ROUTES } from '@/constants';
 import type { ManagedUserRole } from '@/types';
 
-type AuthMode = 'login' | 'register';
+type AuthMode = 'login' | 'register' | 'registerSuccess' | 'success';
 type DashboardAccessRole = Exclude<ManagedUserRole, 'farmer'>;
+
+const DIVISIONS = [
+  'Dhaka',
+  'Chattogram',
+  'Rajshahi',
+  'Khulna',
+  'Barishal',
+  'Sylhet',
+  'Rangpur',
+  'Mymensingh',
+];
 
 const ROLE_OPTIONS: { value: DashboardAccessRole; label: string; subtitle: string }[] = [
   { value: 'admin', label: 'Admin', subtitle: 'Platform control and audit access' },
@@ -56,6 +67,12 @@ function AdminLoginContent() {
   const [success, setSuccess] = useState('');
   const [registerForm, setRegisterForm] = useState(emptyRegisterForm);
   const [profilePreview, setProfilePreview] = useState('');
+  const [registeredOfficerEmail, setRegisteredOfficerEmail] = useState('');
+  const [registrationOtp, setRegistrationOtp] = useState(['', '', '', '', '', '']);
+  const [registrationOtpVerified, setRegistrationOtpVerified] = useState(false);
+  const [registrationOtpToken, setRegistrationOtpToken] = useState('');
+
+  const isOfficerFlow = selectedRole === 'officer';
 
   const roleConfig = useMemo(
     () => ROLE_OPTIONS.find((role) => role.value === selectedRole) || ROLE_OPTIONS[0],
@@ -66,6 +83,23 @@ function AdminLoginContent() {
     setRegisterForm((prev) => ({ ...prev, [key]: value }));
     setError('');
     setSuccess('');
+  };
+
+  const handleRegistrationOTPChange = (val: string, idx: number) => {
+    if (!/^\d*$/.test(val)) return;
+    const next = [...registrationOtp];
+    next[idx] = val.slice(-1);
+    setRegistrationOtp(next);
+    setRegistrationOtpVerified(false);
+    if (val && idx < 5) {
+      document.getElementById(`officer-registration-otp-${idx + 2}`)?.focus();
+    }
+  };
+
+  const handleRegistrationOTPKeyDown = (event: React.KeyboardEvent<HTMLInputElement>, idx: number) => {
+    if (event.key === 'Backspace' && !registrationOtp[idx] && idx > 0) {
+      document.getElementById(`officer-registration-otp-${idx}`)?.focus();
+    }
   };
 
   const handleProfileImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -133,6 +167,67 @@ function AdminLoginContent() {
     }
   };
 
+  const handleSendOfficerRegistrationOTP = async () => {
+    if (!registerForm.email.includes('@')) {
+      setError('Enter a valid officer registration email address.');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    setSuccess('');
+    setRegistrationOtpVerified(false);
+    setRegistrationOtpToken('');
+
+    const result = await authService.sendOTP(
+      registerForm.email,
+      'officer',
+      'registration',
+      registerForm.name || registerForm.nameBn || 'Officer',
+    );
+
+    setLoading(false);
+
+    if (result.success) {
+      setSuccess(result.message || `OTP sent to ${registerForm.email}.`);
+      setRegistrationOtpToken(result.otpToken || '');
+      return;
+    }
+
+    setError(result.message || 'Unable to send registration OTP.');
+  };
+
+  const handleVerifyOfficerRegistrationOTP = async () => {
+    if (!registerForm.email.includes('@')) {
+      setError('Enter a valid officer registration email address.');
+      return;
+    }
+
+    const code = registrationOtp.join('');
+    if (code.length < 6) {
+      setError('Enter the 6-digit registration OTP.');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    setSuccess('');
+
+    const result = await authService.verifyOTP(registerForm.email, code, 'officer', 'registration');
+
+    setLoading(false);
+
+    if (result.success && result.verifiedToken) {
+      setRegistrationOtpVerified(true);
+      setRegistrationOtpToken(result.verifiedToken);
+      setSuccess('Registration OTP verified successfully.');
+      return;
+    }
+
+    setRegistrationOtpVerified(false);
+    setError('Invalid or expired registration OTP. Please request a new one.');
+  };
+
   const handleOTPChange = (val: string, idx: number) => {
     if (!/^\d*$/.test(val)) return;
     const next = [...otp];
@@ -153,12 +248,6 @@ function AdminLoginContent() {
       setError('Enter your password.');
       return;
     }
-    const code = otp.join('');
-    if (code.length < 6) {
-      setError('Enter the 6-digit OTP.');
-      return;
-    }
-
     setLoading(true);
     setError('');
     setSuccess('');
@@ -166,6 +255,22 @@ function AdminLoginContent() {
     if (!passwordResult.success) {
       setLoading(false);
       setError('Invalid email or password for the selected role.');
+      return;
+    }
+
+    if (isOfficerFlow && passwordResult.role) {
+      setLoading(false);
+      setMode('success');
+      setTimeout(() => {
+        window.location.href = DASHBOARD_ROUTES.officer;
+      }, 1200);
+      return;
+    }
+
+    const code = otp.join('');
+    if (code.length < 6) {
+      setLoading(false);
+      setError('Enter the 6-digit OTP.');
       return;
     }
 
@@ -185,6 +290,26 @@ function AdminLoginContent() {
     setLoading(true);
     setError('');
     setSuccess('');
+
+    if (isOfficerFlow) {
+      if (!registerForm.email.includes('@')) {
+        setLoading(false);
+        setError('Enter a valid officer email address.');
+        return;
+      }
+
+      if (!registerForm.name.trim() || !registerForm.phone.trim() || !registerForm.password.trim()) {
+        setLoading(false);
+        setError('Please fill in all required officer information.');
+        return;
+      }
+
+      if (!registrationOtpVerified || !registrationOtpToken) {
+        setLoading(false);
+        setError('Verify the OTP sent to your registration email before submitting.');
+        return;
+      }
+    }
 
     const result = await authService.registerRoleUser({
       role: selectedRole,
@@ -208,6 +333,7 @@ function AdminLoginContent() {
       registrationNo: registerForm.registrationNo,
       companyName: registerForm.companyName || registerForm.name,
       avatar: profilePreview || undefined,
+      registrationOtpToken: isOfficerFlow ? registrationOtpToken : undefined,
     });
 
     setLoading(false);
@@ -218,6 +344,20 @@ function AdminLoginContent() {
     }
 
     const createdUser = result.user;
+
+    if (isOfficerFlow) {
+      setRegisteredOfficerEmail(registerForm.email);
+      setEmail(registerForm.email);
+      setPassword('');
+      setRegistrationOtp(['', '', '', '', '', '']);
+      setRegistrationOtpVerified(false);
+      setRegistrationOtpToken('');
+      setRegisterForm(emptyRegisterForm);
+      setProfilePreview('');
+      setMode('registerSuccess');
+      return;
+    }
+
     setSuccess(`${roleConfig.label} account created successfully. Redirecting to dashboard...`);
     setRegisterForm(emptyRegisterForm);
     setProfilePreview('');
@@ -290,7 +430,13 @@ function AdminLoginContent() {
               {mode === 'login' ? 'Dashboard Login' : 'Role Registration'}
             </h1>
             <p className="text-gray-500">
-              {mode === 'login' ? 'Select admin, officer, vendor, or company role and sign in with password and OTP verification.' : 'Create an admin, officer, vendor, or company account and show it directly on the matching dashboard.'}
+              {mode === 'login'
+                ? (isOfficerFlow
+                  ? 'Use officer email and password to access the advisory dashboard.'
+                  : 'Select admin, officer, vendor, or company role and sign in with password and OTP verification.')
+                : (isOfficerFlow
+                  ? 'Officer registration uses email OTP verification before account creation.'
+                  : 'Create an admin, officer, vendor, or company account and show it directly on the matching dashboard.')}
             </p>
           </div>
 
@@ -385,34 +531,36 @@ function AdminLoginContent() {
                 </div>
               </div>
 
-              <div>
-                <div className="flex items-center justify-between gap-3 mb-3">
-                  <label className="block text-sm font-semibold text-gray-700">OTP Code</label>
-                  <button
-                    type="button"
-                    onClick={handleSendOTP}
-                    disabled={loading}
-                    className="inline-flex items-center gap-2 rounded-full bg-forest px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-forest-light disabled:opacity-60"
-                  >
-                    <Mail className="w-4 h-4" />
-                    {loading ? 'Sending...' : 'Send OTP'}
-                  </button>
+              {!isOfficerFlow && (
+                <div>
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <label className="block text-sm font-semibold text-gray-700">OTP Code</label>
+                    <button
+                      type="button"
+                      onClick={handleSendOTP}
+                      disabled={loading}
+                      className="inline-flex items-center gap-2 rounded-full bg-forest px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-forest-light disabled:opacity-60"
+                    >
+                      <Mail className="w-4 h-4" />
+                      {loading ? 'Sending...' : 'Send OTP'}
+                    </button>
+                  </div>
+                  <div className="flex gap-2 sm:gap-3 overflow-x-auto pb-1">
+                    {otp.map((digit, i) => (
+                      <input
+                        key={i}
+                        id={`role-otp-${i}`}
+                        type="text"
+                        inputMode="numeric"
+                        value={digit}
+                        onChange={(e) => handleOTPChange(e.target.value, i)}
+                        className="h-12 w-12 sm:h-14 sm:w-14 text-center text-xl font-bold border-2 border-gray-200 rounded-xl focus:outline-none focus:border-forest focus:ring-2 focus:ring-forest/20 transition-colors"
+                        maxLength={1}
+                      />
+                    ))}
+                  </div>
                 </div>
-                <div className="flex gap-2 sm:gap-3 overflow-x-auto pb-1">
-                  {otp.map((digit, i) => (
-                    <input
-                      key={i}
-                      id={`role-otp-${i}`}
-                      type="text"
-                      inputMode="numeric"
-                      value={digit}
-                      onChange={(e) => handleOTPChange(e.target.value, i)}
-                      className="h-12 w-12 sm:h-14 sm:w-14 text-center text-xl font-bold border-2 border-gray-200 rounded-xl focus:outline-none focus:border-forest focus:ring-2 focus:ring-forest/20 transition-colors"
-                      maxLength={1}
-                    />
-                  ))}
-                </div>
-              </div>
+              )}
 
               {error && <p className="text-red-500 text-sm">{error}</p>}
               {success && <p className="text-green-600 text-sm">{success}</p>}
@@ -424,18 +572,77 @@ function AdminLoginContent() {
               <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3">
                 <p className="text-blue-700 text-sm flex items-start gap-2">
                   <ShieldCheck className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                  Password আর OTP দুইটাই লাগবে। Demo OTP: <strong>123456</strong>
+                  {isOfficerFlow
+                    ? <>Officer login এখন direct email + password দিয়ে হবে. Registration-এর সময় email OTP verify করতে হবে.</>
+                    : <>Password আর OTP দুইটাই লাগবে। Demo OTP: <strong>123456</strong></>}
                 </p>
               </div>
             </form>
-          ) : (
+          ) : mode === 'register' ? (
             <form onSubmit={handleRegister} className="space-y-4">
               <div className="grid sm:grid-cols-2 gap-4">
                 <input className="input-field" placeholder="Full Name" value={registerForm.name} onChange={(e) => setRegisterField('name', e.target.value)} required />
                 <input className="input-field" placeholder="Name (BN)" value={registerForm.nameBn} onChange={(e) => setRegisterField('nameBn', e.target.value)} />
-                <input className="input-field" type="email" placeholder="Email" value={registerForm.email} onChange={(e) => setRegisterField('email', e.target.value)} required />
+                {isOfficerFlow ? (
+                  <div className="sm:col-span-2">
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Email Address</label>
+                    <div className="flex gap-3">
+                      <input className="input-field flex-1" type="email" placeholder="officer@email.com" value={registerForm.email} onChange={(e) => {
+                        setRegisterField('email', e.target.value);
+                        setRegistrationOtpVerified(false);
+                        setRegistrationOtpToken('');
+                      }} required />
+                      <button
+                        type="button"
+                        onClick={handleSendOfficerRegistrationOTP}
+                        disabled={loading}
+                        className="rounded-xl bg-forest px-4 py-3 text-sm font-semibold text-white hover:bg-forest-light disabled:opacity-60"
+                      >
+                        {loading ? 'Sending...' : 'Send OTP'}
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-2">This email will receive the officer registration OTP.</p>
+                  </div>
+                ) : (
+                  <input className="input-field" type="email" placeholder="Email" value={registerForm.email} onChange={(e) => setRegisterField('email', e.target.value)} required />
+                )}
                 <input className="input-field" placeholder="Phone Number" value={registerForm.phone} onChange={(e) => setRegisterField('phone', e.target.value)} required />
                 <input className="input-field" type="password" placeholder="Password" value={registerForm.password} onChange={(e) => setRegisterField('password', e.target.value)} required />
+                {isOfficerFlow && (
+                  <div className="sm:col-span-2">
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                      <label className="block text-sm font-semibold text-gray-700">Registration OTP</label>
+                      <button
+                        type="button"
+                        onClick={handleVerifyOfficerRegistrationOTP}
+                        disabled={loading}
+                        className="text-sm font-semibold text-forest hover:text-harvest disabled:opacity-60"
+                      >
+                        Verify OTP
+                      </button>
+                    </div>
+                    <div className="flex gap-2 sm:gap-3 overflow-x-auto pb-1">
+                      {registrationOtp.map((digit, i) => (
+                        <input
+                          key={i}
+                          id={`officer-registration-otp-${i + 1}`}
+                          type="text"
+                          inputMode="numeric"
+                          value={digit}
+                          onChange={(e) => handleRegistrationOTPChange(e.target.value, i)}
+                          onKeyDown={(e) => handleRegistrationOTPKeyDown(e, i)}
+                          className="h-12 w-12 sm:h-14 sm:w-14 text-center text-xl font-bold border-2 border-gray-200 rounded-xl focus:outline-none focus:border-forest focus:ring-2 focus:ring-forest/20 transition-colors"
+                          maxLength={1}
+                        />
+                      ))}
+                    </div>
+                    <p className={`mt-2 text-xs ${registrationOtpVerified ? 'text-green-600' : 'text-gray-400'}`}>
+                      {registrationOtpVerified
+                        ? 'Email OTP verified. You can submit the officer registration now.'
+                        : 'Send OTP to your email, then enter the 6-digit code here and verify it.'}
+                    </p>
+                  </div>
+                )}
                 <div className="sm:col-span-2">
                   <label className="block text-sm font-semibold text-gray-700 mb-2">Profile Image (Optional)</label>
                   <label className="input-field flex cursor-pointer items-center justify-between gap-3">
@@ -469,7 +676,16 @@ function AdminLoginContent() {
                   )}
                 </div>
                 <input className="input-field" placeholder="Designation / Title" value={registerForm.designation} onChange={(e) => setRegisterField('designation', e.target.value)} />
-                <input className="input-field" placeholder="Division" value={registerForm.division} onChange={(e) => setRegisterField('division', e.target.value)} />
+                {isOfficerFlow ? (
+                  <select className="input-field" value={registerForm.division} onChange={(e) => setRegisterField('division', e.target.value)} required>
+                    <option value="">Select division</option>
+                    {DIVISIONS.map((division) => (
+                      <option key={division} value={division}>{division}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input className="input-field" placeholder="Division" value={registerForm.division} onChange={(e) => setRegisterField('division', e.target.value)} />
+                )}
                 <input className="input-field" placeholder="District" value={registerForm.district} onChange={(e) => setRegisterField('district', e.target.value)} />
                 <input className="input-field" placeholder="Upazila / Area" value={registerForm.upazila} onChange={(e) => setRegisterField('upazila', e.target.value)} />
                 <input className="input-field" placeholder="Access Label" value={registerForm.accessLabel} onChange={(e) => setRegisterField('accessLabel', e.target.value)} />
@@ -506,6 +722,29 @@ function AdminLoginContent() {
                 {loading ? 'Creating account...' : <>Create {roleConfig.label} Account <UserPlus className="w-4 h-4" /></>}
               </button>
             </form>
+          ) : mode === 'registerSuccess' ? (
+            <div className="text-center">
+              <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg className="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <h2 className="text-2xl font-bold text-gray-900 mb-2">Registration Submitted</h2>
+              <p className="text-gray-500 mb-6">Officer details have been captured successfully. You can now log in with <strong>{registeredOfficerEmail || email}</strong>.</p>
+              <button type="button" onClick={() => setMode('login')} className="btn-primary">
+                Back to Officer Login
+              </button>
+            </div>
+          ) : (
+            <div className="text-center">
+              <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg className="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <h2 className="text-2xl font-bold text-gray-900 mb-2">Login Successful!</h2>
+              <p className="text-gray-500">Redirecting to your dashboard...</p>
+            </div>
           )}
 
           <div className="mt-8 text-center">

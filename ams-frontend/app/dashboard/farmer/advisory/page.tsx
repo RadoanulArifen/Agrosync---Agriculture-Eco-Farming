@@ -20,7 +20,37 @@ export default function FarmerAdvisoryPage() {
   const [photoPreview, setPhotoPreview] = useState('');
   const [form, setForm] = useState({ cropType: '', description: '' });
 
-  const handlePhotoChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const compressImage = (file: File) => new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read image file.'));
+    reader.onload = () => {
+      const source = typeof reader.result === 'string' ? reader.result : '';
+      const image = new Image();
+      image.onerror = () => reject(new Error('Failed to process image.'));
+      image.onload = () => {
+        const maxSide = 1200;
+        const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
+        const width = Math.max(1, Math.round(image.width * scale));
+        const height = Math.max(1, Math.round(image.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext('2d');
+
+        if (!context) {
+          reject(new Error('Failed to prepare image canvas.'));
+          return;
+        }
+
+        context.drawImage(image, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', 0.72));
+      };
+      image.src = source;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  const handlePhotoChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -30,12 +60,15 @@ export default function FarmerAdvisoryPage() {
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      setPhotoPreview(typeof reader.result === 'string' ? reader.result : '');
+    try {
+      const optimizedImage = await compressImage(file);
+      setPhotoPreview(optimizedImage);
       setSuccessMessage('');
-    };
-    reader.readAsDataURL(file);
+    } catch (error) {
+      console.error('[Advisory] Failed to optimize image upload', error);
+      setSuccessMessage('Image processing failed. Please try another image.');
+      event.target.value = '';
+    }
   };
 
   useEffect(() => {
