@@ -1,0 +1,124 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { MapPin, Package, Truck } from 'lucide-react';
+import DashboardShell from '@/components/dashboard/DashboardShell';
+import { Card, EmptyState, PageHeader, StatusBadge } from '@/components/dashboard/DashboardComponents';
+import { FARMER_NAV_ITEMS, useFarmerContext } from '@/components/dashboard/useFarmerContext';
+import { orderService } from '@/services';
+import type { Order } from '@/types';
+import { formatBDT, formatDate } from '@/utils';
+
+const TRACKING_STEPS: Order['status'][] = ['pending', 'confirmed', 'dispatched', 'delivered'];
+
+export default function FarmerOrdersPage() {
+  const { farmer, unreadNotifications, loading } = useFarmerContext();
+  const [orders, setOrders] = useState<Order[]>([]);
+
+  useEffect(() => {
+    if (!farmer) return;
+    orderService.getOrders(farmer.id).then(setOrders);
+  }, [farmer]);
+
+  if (loading || !farmer) {
+    return (
+      <DashboardShell navItems={FARMER_NAV_ITEMS} role="farmer" userName="Farmer" userSubtitle="Loading profile..." notificationCount={0}>
+        <PageHeader title="Loading orders..." subtitle="Preparing your account" />
+      </DashboardShell>
+    );
+  }
+
+  return (
+    <DashboardShell navItems={FARMER_NAV_ITEMS} role="farmer" userName={farmer.name} userSubtitle={`FID: ${farmer.fid}`} notificationCount={unreadNotifications}>
+      <PageHeader title="My Orders" subtitle="Review order items, payment details, and delivery tracking" />
+
+      {orders.length === 0 ? (
+        <Card>
+          <EmptyState icon={Package} title="No orders yet" description="Your marketplace orders will appear here." />
+        </Card>
+      ) : (
+        <div className="space-y-4">
+          {orders.map((order) => {
+            const activeStep = Math.max(TRACKING_STEPS.indexOf(order.status), 0);
+
+            return (
+              <Card key={order.id}>
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                  <div>
+                    <div className="font-semibold text-gray-800">{order.vendorName}</div>
+                    <div className="text-xs text-gray-400 mt-1">{order.id} · Placed {formatDate(order.placedAt)}</div>
+                  </div>
+                  <StatusBadge status={order.status} />
+                </div>
+
+                <div className="grid md:grid-cols-3 gap-3 mt-4">
+                  <div className="rounded-xl bg-gray-50 p-3">
+                    <div className="text-xs text-gray-400">Amount</div>
+                    <div className="font-semibold">{formatBDT(order.totalAmount)}</div>
+                  </div>
+                  <div className="rounded-xl bg-gray-50 p-3">
+                    <div className="text-xs text-gray-400">Payment</div>
+                    <div className="font-semibold capitalize">{order.paymentGateway} · {order.paymentStatus}</div>
+                  </div>
+                  <div className="rounded-xl bg-gray-50 p-3">
+                    <div className="text-xs text-gray-400">Estimated Delivery</div>
+                    <div className="font-semibold">{order.estimatedDelivery}</div>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-2xl border border-gray-100 p-4">
+                  <div className="text-sm font-semibold text-gray-800 mb-3">Ordered Items</div>
+                  <div className="space-y-3">
+                    {order.items.map((item) => (
+                      <div key={item.productId} className="flex items-center justify-between gap-3 rounded-xl bg-gray-50 px-4 py-3">
+                        <div>
+                          <div className="font-medium text-gray-800 text-sm">{item.productName}</div>
+                          <div className="text-xs text-gray-400 mt-1">Qty {item.quantity} · {item.unit}</div>
+                        </div>
+                        <div className="text-sm font-semibold text-forest">{formatBDT(item.price * item.quantity)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-2xl border border-gray-100 p-4">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Truck className="w-4 h-4 text-forest" />
+                    <div className="text-sm font-semibold text-gray-800">Delivery Tracking</div>
+                  </div>
+
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {TRACKING_STEPS.map((step, index) => {
+                      const isComplete = activeStep >= index;
+                      return (
+                        <div key={step} className={`rounded-xl border p-3 ${isComplete ? 'border-forest/20 bg-forest/5' : 'border-gray-100 bg-gray-50'}`}>
+                          <div className={`text-xs font-semibold uppercase ${isComplete ? 'text-forest' : 'text-gray-400'}`}>{step.replace('_', ' ')}</div>
+                          <div className="text-xs text-gray-500 mt-1">
+                            {step === 'pending' && 'Order created'}
+                            {step === 'confirmed' && 'Payment verified'}
+                            {step === 'dispatched' && 'Vendor sent parcel'}
+                            {step === 'delivered' && 'Delivered to you'}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-3 text-sm text-gray-500">
+                    <div className="flex items-center gap-2">
+                      <MapPin className="w-4 h-4 text-gray-400" />
+                      Delivery location: {farmer.upazila}, {farmer.district}
+                    </div>
+                    {order.deliveredAt && (
+                      <div>Delivered on {formatDate(order.deliveredAt)}</div>
+                    )}
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </DashboardShell>
+  );
+}

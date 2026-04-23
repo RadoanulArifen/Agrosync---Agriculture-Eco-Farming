@@ -1,0 +1,48 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.zed/
+.cursor/
+.nova/
+.codex
+**/.codex
+
+# Environment / secrets
+.env
+.env.*
+!**/.env.example
+auth.json
+
+# Logs / caches
+*.log
+*.cache
+
+# Frontend (Next.js)
+/ams-frontend/node_modules/
+/ams-frontend/.next/
+/ams-frontend/out/
+/ams-frontend/coverage/
+/ams-frontend/tsconfig.tsbuildinfo
+
+# Backend (Laravel)
+/backend/vendor/
+/backend/node_modules/
+/backend/public/build/
+/backend/public/hot
+/backend/public/storage
+/backend/storage/*.key
+/backend/storage/pail
+/backend/.phpunit.cache/
+/backend/.phpunit.result.cache
+/backend/.phpactor.json
+/backend/_ide_helper.php
+/backend/Homestead.json
+/backend/Homestead.yaml
+
+# Local databases
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal

@@ -1,0 +1,133 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --forest: #1a4731;
+  --forest-light: #2d6a4f;
+  --harvest: #f59e0b;
+  --harvest-light: #fbbf24;
+  --earth: #854d0e;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    font-size: 17px;
+  }
+
+  body {
+    font-family: 'Source Sans 3', system-ui, sans-serif;
+    color: #1f2937;
+    background: #ffffff;
+    line-height: 1.6;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: 'Playfair Display', Georgia, serif;
+    line-height: 1.2;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-harvest hover:bg-harvest-dark text-white text-base font-semibold px-6 py-3.5 rounded-full transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 active:translate-y-0;
+  }
+
+  .btn-secondary {
+    @apply bg-forest hover:bg-forest-light text-white text-base font-semibold px-6 py-3.5 rounded-full transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5;
+  }
+
+  .btn-outline {
+    @apply border-2 border-forest text-forest text-base hover:bg-forest hover:text-white font-semibold px-6 py-3.5 rounded-full transition-all duration-200;
+  }
+
+  .btn-warning {
+    @apply inline-flex items-center justify-center border border-amber-200 text-amber-700 text-base hover:bg-amber-50 font-semibold px-6 py-3.5 rounded-full transition-all duration-200;
+  }
+
+  .btn-success {
+    @apply inline-flex items-center justify-center border border-green-200 text-green-700 text-base hover:bg-green-50 font-semibold px-6 py-3.5 rounded-full transition-all duration-200;
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center border border-red-200 text-red-700 text-base hover:bg-red-50 font-semibold px-6 py-3.5 rounded-full transition-all duration-200;
+  }
+
+  .btn-info {
+    @apply inline-flex items-center justify-center border border-blue-200 text-blue-700 text-base hover:bg-blue-50 font-semibold px-6 py-3.5 rounded-full transition-all duration-200;
+  }
+
+  .btn-neutral {
+    @apply inline-flex items-center justify-center border border-gray-200 text-gray-700 text-base hover:bg-gray-50 font-semibold px-6 py-3.5 rounded-full transition-all duration-200;
+  }
+
+  .section-heading {
+    @apply text-3xl md:text-4xl font-bold text-forest mb-4;
+  }
+
+  .section-subheading {
+    @apply text-harvest-light font-semibold text-base uppercase tracking-widest mb-3;
+  }
+
+  .card {
+    @apply bg-white rounded-2xl shadow-sm border border-gray-100 hover:shadow-md transition-shadow duration-200;
+  }
+
+  .stat-card {
+    @apply bg-white rounded-2xl p-6 shadow-sm border border-gray-100;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-3 py-1 rounded-full text-sm font-medium;
+  }
+
+  .input-field {
+    @apply w-full border border-gray-200 rounded-xl px-4 py-3.5 text-base focus:outline-none focus:ring-2 focus:ring-forest/30 focus:border-forest transition-colors;
+  }
+
+  .form-label {
+    @apply text-sm font-semibold text-gray-500;
+  }
+
+  .sidebar-link {
+    @apply flex items-center gap-3 px-4 py-3.5 rounded-xl text-gray-600 hover:bg-forest/5 hover:text-forest transition-colors text-base font-medium;
+  }
+
+  .sidebar-link.active {
+    @apply bg-forest text-white hover:bg-forest-light hover:text-white;
+  }
+}
+
+/* Harvest/gold gradient text */
+.gradient-text {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Leaf decoration */
+.leaf-bg {
+  background-image: radial-gradient(circle at 20% 50%, rgba(45,106,79,0.08) 0%, transparent 60%),
+                    radial-gradient(circle at 80% 20%, rgba(245,158,11,0.06) 0%, transparent 50%);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #f1f5f9; }
+::-webkit-scrollbar-thumb { background: #2d6a4f; border-radius: 3px; }
+
+/* Animation utilities */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.6s ease-out forwards;
+}
+
+.animate-delay-100 { animation-delay: 100ms; }
+.animate-delay-200 { animation-delay: 200ms; }
+.animate-delay-300 { animation-delay: 300ms; }
