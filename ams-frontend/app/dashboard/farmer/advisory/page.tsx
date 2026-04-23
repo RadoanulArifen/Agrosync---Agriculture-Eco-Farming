@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { MessageSquare } from 'lucide-react';
+import { ImagePlus, MessageSquare, X } from 'lucide-react';
 import DashboardShell from '@/components/dashboard/DashboardShell';
 import {
   Card, EmptyState, PageHeader, SectionHeader, StatusBadge,
@@ -17,7 +17,26 @@ export default function FarmerAdvisoryPage() {
   const [showForm, setShowForm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
+  const [photoPreview, setPhotoPreview] = useState('');
   const [form, setForm] = useState({ cropType: '', description: '' });
+
+  const handlePhotoChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      setSuccessMessage('Please choose a valid crop image.');
+      event.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setPhotoPreview(typeof reader.result === 'string' ? reader.result : '');
+      setSuccessMessage('');
+    };
+    reader.readAsDataURL(file);
+  };
 
   useEffect(() => {
     if (!farmer) return;
@@ -39,7 +58,7 @@ export default function FarmerAdvisoryPage() {
       farmerId: farmer.id,
       cropType: form.cropType,
       description: form.description,
-      photos: [],
+      photos: photoPreview ? [photoPreview] : [],
     });
     setSubmitting(false);
 
@@ -48,6 +67,7 @@ export default function FarmerAdvisoryPage() {
       const latestCases = await advisoryService.getAdvisoryCases(farmer.id);
       setCases(latestCases);
       setForm({ cropType: '', description: '' });
+      setPhotoPreview('');
       setShowForm(false);
       setTimeout(() => setSuccessMessage(''), 3000);
     }
@@ -91,6 +111,33 @@ export default function FarmerAdvisoryPage() {
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
                 required
               />
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-gray-300 bg-gray-50 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-800">Crop Image</div>
+                    <div className="text-xs text-gray-500">Optional. Add one clear photo of the affected crop or leaf.</div>
+                  </div>
+                  <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition hover:border-forest hover:text-forest">
+                    <ImagePlus className="h-4 w-4" />
+                    <span>Upload</span>
+                    <input type="file" accept="image/*" className="hidden" onChange={handlePhotoChange} />
+                  </label>
+                </div>
+
+                {photoPreview && (
+                  <div className="relative w-full overflow-hidden rounded-xl border border-gray-200 bg-white p-2">
+                    <button
+                      type="button"
+                      onClick={() => setPhotoPreview('')}
+                      className="absolute right-4 top-4 z-10 inline-flex h-8 w-8 items-center justify-center rounded-full bg-black/70 text-white transition hover:bg-black"
+                      aria-label="Remove uploaded image"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                    <img src={photoPreview} alt="Crop issue preview" className="h-52 w-full rounded-lg object-cover" />
+                  </div>
+                )}
+              </div>
               <button type="submit" disabled={submitting} className="btn-primary text-sm disabled:opacity-60">
                 {submitting ? 'Submitting...' : 'Submit Advisory'}
               </button>
@@ -114,6 +161,11 @@ export default function FarmerAdvisoryPage() {
                   <StatusBadge status={caseItem.status} />
                 </div>
                 <p className="text-sm text-gray-500 mb-3">{caseItem.description}</p>
+                {caseItem.photos?.[0] && (
+                  <div className="mb-3 overflow-hidden rounded-xl border border-gray-200 bg-gray-50">
+                    <img src={caseItem.photos[0]} alt={`${caseItem.cropType} issue`} className="h-48 w-full object-cover" />
+                  </div>
+                )}
                 {caseItem.aiDiagnosis && (
                   <div className="rounded-xl bg-blue-50 border border-blue-100 p-3 mb-3">
                     <div className="text-xs font-semibold text-blue-700">AI Pre-Diagnosis</div>

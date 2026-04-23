@@ -85,6 +85,11 @@ export default function OfficerCaseBoard({
                 <StatusBadge status={respondedIds.has(c.id) ? 'responded' : c.status} />
               </div>
               <p className="text-xs text-gray-500 line-clamp-2">{c.description}</p>
+              {c.photos?.[0] && (
+                <div className="mt-3 overflow-hidden rounded-xl border border-gray-200 bg-white">
+                  <img src={c.photos[0]} alt={`${c.cropType} case`} className="h-32 w-full object-cover" />
+                </div>
+              )}
               {c.aiDiagnosis && (
                 <div className="mt-2 bg-blue-50 rounded-lg px-3 py-2">
                   <span className="text-xs text-blue-600 font-semibold">AI: </span>
@@ -117,6 +122,12 @@ export default function OfficerCaseBoard({
                   <div className="text-xs text-gray-400 mb-1">Farmer's Description</div>
                   <p className="text-sm text-gray-700">{activeCase.description}</p>
                 </div>
+                {activeCase.photos?.[0] && (
+                  <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+                    <div className="border-b border-gray-100 px-3 py-2 text-xs font-semibold text-gray-500">Uploaded Crop Image</div>
+                    <img src={activeCase.photos[0]} alt={`${activeCase.cropType} issue`} className="h-64 w-full object-cover" />
+                  </div>
+                )}
                 {activeCase.aiDiagnosis && (
                   <div className="bg-blue-50 border border-blue-100 rounded-xl p-3">
                     <div className="text-xs font-semibold text-blue-700 mb-1">AI Pre-Diagnosis ({activeCase.aiConfidence}% confidence)</div>
