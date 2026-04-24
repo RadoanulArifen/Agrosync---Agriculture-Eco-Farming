@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Leaf, Mail, ArrowRight, UserPlus, Rocket, RotateCcw, Upload, X, ShieldCheck, Lock, Eye, EyeOff } from 'lucide-react';
 import { authService, DEMO_CREDENTIALS } from '@/services';
+import type { BdLocationOption } from '@/services/bdLocations';
+import { getDistrictsByDivision, getUpazilasByDistrictId } from '@/services/bdLocations';
 import { DASHBOARD_ROUTES } from '@/constants';
 import type { ManagedUserRole } from '@/types';
 
@@ -71,6 +73,11 @@ function AdminLoginContent() {
   const [registrationOtp, setRegistrationOtp] = useState(['', '', '', '', '', '']);
   const [registrationOtpVerified, setRegistrationOtpVerified] = useState(false);
   const [registrationOtpToken, setRegistrationOtpToken] = useState('');
+  const [districts, setDistricts] = useState<BdLocationOption[]>([]);
+  const [upazilas, setUpazilas] = useState<BdLocationOption[]>([]);
+  const [selectedDistrictId, setSelectedDistrictId] = useState('');
+  const [locationLoading, setLocationLoading] = useState({ districts: false, upazilas: false });
+  const [locationError, setLocationError] = useState({ districts: '', upazilas: '' });
 
   const isOfficerFlow = selectedRole === 'officer';
 
@@ -83,6 +90,68 @@ function AdminLoginContent() {
     setRegisterForm((prev) => ({ ...prev, [key]: value }));
     setError('');
     setSuccess('');
+  };
+
+  const handleDivisionChange = async (division: string) => {
+    setRegisterForm((prev) => ({
+      ...prev,
+      division,
+      district: '',
+      upazila: '',
+    }));
+    setDistricts([]);
+    setUpazilas([]);
+    setSelectedDistrictId('');
+    setLocationError({ districts: '', upazilas: '' });
+    setError('');
+    setSuccess('');
+
+    if (!division) {
+      return;
+    }
+
+    setLocationLoading((prev) => ({ ...prev, districts: true }));
+
+    try {
+      const districtOptions = await getDistrictsByDivision(division);
+      setDistricts(districtOptions);
+    } catch (locationLoadError) {
+      console.error('Failed to load districts', locationLoadError);
+      setLocationError((prev) => ({ ...prev, districts: 'District list could not be loaded. You can type it manually.' }));
+    } finally {
+      setLocationLoading((prev) => ({ ...prev, districts: false }));
+    }
+  };
+
+  const handleDistrictChange = async (districtId: string) => {
+    const district = districts.find((item) => item.id === districtId);
+
+    setSelectedDistrictId(districtId);
+    setRegisterForm((prev) => ({
+      ...prev,
+      district: district?.name || '',
+      upazila: '',
+    }));
+    setUpazilas([]);
+    setLocationError((prev) => ({ ...prev, upazilas: '' }));
+    setError('');
+    setSuccess('');
+
+    if (!districtId) {
+      return;
+    }
+
+    setLocationLoading((prev) => ({ ...prev, upazilas: true }));
+
+    try {
+      const upazilaOptions = await getUpazilasByDistrictId(districtId);
+      setUpazilas(upazilaOptions);
+    } catch (locationLoadError) {
+      console.error('Failed to load upazilas', locationLoadError);
+      setLocationError((prev) => ({ ...prev, upazilas: 'Upazila list could not be loaded. You can type it manually.' }));
+    } finally {
+      setLocationLoading((prev) => ({ ...prev, upazilas: false }));
+    }
   };
 
   const handleRegistrationOTPChange = (val: string, idx: number) => {
@@ -676,18 +745,68 @@ function AdminLoginContent() {
                   )}
                 </div>
                 <input className="input-field" placeholder="Designation / Title" value={registerForm.designation} onChange={(e) => setRegisterField('designation', e.target.value)} />
-                {isOfficerFlow ? (
-                  <select className="input-field" value={registerForm.division} onChange={(e) => setRegisterField('division', e.target.value)} required>
-                    <option value="">Select division</option>
-                    {DIVISIONS.map((division) => (
-                      <option key={division} value={division}>{division}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input className="input-field" placeholder="Division" value={registerForm.division} onChange={(e) => setRegisterField('division', e.target.value)} />
-                )}
-                <input className="input-field" placeholder="District" value={registerForm.district} onChange={(e) => setRegisterField('district', e.target.value)} />
-                <input className="input-field" placeholder="Upazila / Area" value={registerForm.upazila} onChange={(e) => setRegisterField('upazila', e.target.value)} />
+                <select className="input-field" value={registerForm.division} onChange={(e) => void handleDivisionChange(e.target.value)} required>
+                  <option value="">Select division</option>
+                  {DIVISIONS.map((division) => (
+                    <option key={division} value={division}>{division}</option>
+                  ))}
+                </select>
+                <div>
+                  {locationLoading.districts || districts.length > 0 ? (
+                    <select
+                      className="input-field"
+                      value={selectedDistrictId}
+                      onChange={(e) => void handleDistrictChange(e.target.value)}
+                      disabled={!registerForm.division || locationLoading.districts}
+                      required
+                    >
+                      <option value="">
+                        {locationLoading.districts ? 'Loading districts...' : 'Select district'}
+                      </option>
+                      {districts.map((district) => (
+                        <option key={district.id} value={district.id}>{district.name}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      className="input-field"
+                      placeholder="District"
+                      value={registerForm.district}
+                      onChange={(e) => setRegisterField('district', e.target.value)}
+                      disabled={!registerForm.division}
+                      required
+                    />
+                  )}
+                  {locationError.districts && <p className="mt-2 text-xs text-amber-600">{locationError.districts}</p>}
+                </div>
+                <div>
+                  {locationLoading.upazilas || upazilas.length > 0 ? (
+                    <select
+                      className="input-field"
+                      value={registerForm.upazila}
+                      onChange={(e) => setRegisterField('upazila', e.target.value)}
+                      disabled={!registerForm.district || locationLoading.upazilas}
+                      required
+                    >
+                      <option value="">
+                        {locationLoading.upazilas ? 'Loading upazilas...' : 'Select upazila'}
+                      </option>
+                      {upazilas.map((upazila) => (
+                        <option key={upazila.id} value={upazila.name}>{upazila.name}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      className="input-field"
+                      placeholder="Upazila / Area"
+                      value={registerForm.upazila}
+                      onChange={(e) => setRegisterField('upazila', e.target.value)}
+                      disabled={!registerForm.district}
+                      required
+                    />
+                  )}
+                  {locationError.upazilas && <p className="mt-2 text-xs text-amber-600">{locationError.upazilas}</p>}
+                </div>
                 <input className="input-field" placeholder="Access Label" value={registerForm.accessLabel} onChange={(e) => setRegisterField('accessLabel', e.target.value)} />
 
                 {(selectedRole === 'vendor' || selectedRole === 'company') && (

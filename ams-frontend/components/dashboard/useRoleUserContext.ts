@@ -10,17 +10,26 @@ interface UseRoleUserContextOptions {
 }
 
 export function useRoleUserContext({ role, fallbackUser }: UseRoleUserContextOptions) {
-  const [user, setUser] = useState<DashboardRoleUser>(fallbackUser);
+  const resolveUser = () => {
+    const currentUser = authService.getCurrentUser();
+    return currentUser?.role === role ? currentUser : fallbackUser;
+  };
+
+  const [user, setUser] = useState<DashboardRoleUser>(() => resolveUser());
   const [notificationCount, setNotificationCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const currentUser = authService.getCurrentUser();
-    const resolvedUser = currentUser?.role === role ? currentUser : fallbackUser;
-    setUser(resolvedUser);
+    const syncUser = () => {
+      const resolvedUser = resolveUser();
+      setUser(resolvedUser);
+      return resolvedUser;
+    };
 
-    const syncNotificationCount = () => {
-      notificationService.getNotifications(resolvedUser.id)
+    const resolvedUser = syncUser();
+
+    const syncNotificationCount = (targetUser = syncUser()) => {
+      notificationService.getNotifications(targetUser.id)
         .then((notifications) => {
           setNotificationCount(notifications.filter((notification) => !notification.isRead).length);
         })
@@ -30,7 +39,11 @@ export function useRoleUserContext({ role, fallbackUser }: UseRoleUserContextOpt
     syncNotificationCount();
 
     const handleStorage = (event: StorageEvent) => {
-      if (event.key && event.key !== 'ams_notifications') return;
+      if (event.key && !['ams_notifications', 'ams_role_users', 'ams_current_role_user_id'].includes(event.key)) return;
+      syncNotificationCount();
+    };
+
+    const handleUserSessionUpdated = () => {
       syncNotificationCount();
     };
 
@@ -41,11 +54,13 @@ export function useRoleUserContext({ role, fallbackUser }: UseRoleUserContextOpt
     window.addEventListener('storage', handleStorage);
     window.addEventListener('focus', handleNotificationsUpdated);
     window.addEventListener('ams:notifications-updated', handleNotificationsUpdated);
+    window.addEventListener('ams:user-session-updated', handleUserSessionUpdated);
 
     return () => {
       window.removeEventListener('storage', handleStorage);
       window.removeEventListener('focus', handleNotificationsUpdated);
       window.removeEventListener('ams:notifications-updated', handleNotificationsUpdated);
+      window.removeEventListener('ams:user-session-updated', handleUserSessionUpdated);
     };
   }, [fallbackUser, role]);
 

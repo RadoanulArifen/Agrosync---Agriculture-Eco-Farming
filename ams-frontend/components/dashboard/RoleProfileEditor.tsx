@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { authService } from '@/services';
 import { Card, SectionHeader } from '@/components/dashboard/DashboardComponents';
+import type { BdLocationOption } from '@/services/bdLocations';
+import { getDistrictsByDivision, getUpazilasByDistrictId } from '@/services/bdLocations';
 import type { DashboardRoleUser } from '@/types';
 
 interface ExtraFieldRenderProps {
@@ -17,6 +19,17 @@ interface RoleProfileEditorProps {
   getExtraPayload?: () => Partial<DashboardRoleUser>;
   onCancelEdit?: () => void;
 }
+
+const DIVISIONS = [
+  'Dhaka',
+  'Chattogram',
+  'Rajshahi',
+  'Khulna',
+  'Barishal',
+  'Sylhet',
+  'Rangpur',
+  'Mymensingh',
+];
 
 export default function RoleProfileEditor({
   user,
@@ -41,22 +54,171 @@ export default function RoleProfileEditor({
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState('');
+  const [districts, setDistricts] = useState<BdLocationOption[]>([]);
+  const [upazilas, setUpazilas] = useState<BdLocationOption[]>([]);
+  const [selectedDistrictId, setSelectedDistrictId] = useState('');
+  const [locationLoading, setLocationLoading] = useState({ districts: false, upazilas: false });
+  const [locationError, setLocationError] = useState({ districts: '', upazilas: '' });
 
   useEffect(() => {
     setForm(buildForm());
     setEditing(false);
     setSaved('');
+    setDistricts([]);
+    setUpazilas([]);
+    setSelectedDistrictId('');
+    setLocationLoading({ districts: false, upazilas: false });
+    setLocationError({ districts: '', upazilas: '' });
   }, [user]);
+
+  useEffect(() => {
+    let active = true;
+
+    const hydrateLocationOptions = async () => {
+      if (!editing || !form.division) {
+        if (active) {
+          setDistricts([]);
+          setUpazilas([]);
+          setSelectedDistrictId('');
+          setLocationError({ districts: '', upazilas: '' });
+        }
+        return;
+      }
+
+      setLocationLoading((prev) => ({ ...prev, districts: true }));
+
+      try {
+        const districtOptions = await getDistrictsByDivision(form.division);
+        if (!active) return;
+
+        setDistricts(districtOptions);
+        const matchedDistrict = districtOptions.find((item) => item.name.toLowerCase() === form.district.toLowerCase());
+        const matchedDistrictId = matchedDistrict?.id || '';
+        setSelectedDistrictId(matchedDistrictId);
+        setLocationError((prev) => ({ ...prev, districts: '' }));
+
+        if (!matchedDistrictId) {
+          setUpazilas([]);
+          return;
+        }
+
+        setLocationLoading((prev) => ({ ...prev, upazilas: true }));
+
+        try {
+          const upazilaOptions = await getUpazilasByDistrictId(matchedDistrictId);
+          if (!active) return;
+          setUpazilas(upazilaOptions);
+          setLocationError((prev) => ({ ...prev, upazilas: '' }));
+        } catch (upazilaLoadError) {
+          console.error('Failed to load upazilas', upazilaLoadError);
+          if (!active) return;
+          setUpazilas([]);
+          setLocationError((prev) => ({ ...prev, upazilas: 'Upazila list could not be loaded. You can type it manually.' }));
+        } finally {
+          if (active) {
+            setLocationLoading((prev) => ({ ...prev, upazilas: false }));
+          }
+        }
+      } catch (districtLoadError) {
+        console.error('Failed to load districts', districtLoadError);
+        if (!active) return;
+        setDistricts([]);
+        setUpazilas([]);
+        setSelectedDistrictId('');
+        setLocationError((prev) => ({ ...prev, districts: 'District list could not be loaded. You can type it manually.' }));
+      } finally {
+        if (active) {
+          setLocationLoading((prev) => ({ ...prev, districts: false }));
+        }
+      }
+    };
+
+    void hydrateLocationOptions();
+
+    return () => {
+      active = false;
+    };
+  }, [editing, form.division, form.district]);
 
   const updateField = (key: keyof typeof form, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
     setSaved('');
   };
 
+  const handleStartEdit = () => {
+    setEditing(true);
+    setSaved('');
+  };
+
+  const handleDivisionChange = async (division: string) => {
+    setForm((prev) => ({
+      ...prev,
+      division,
+      district: '',
+      upazila: '',
+    }));
+    setDistricts([]);
+    setUpazilas([]);
+    setSelectedDistrictId('');
+    setLocationError({ districts: '', upazilas: '' });
+    setSaved('');
+
+    if (!division) {
+      return;
+    }
+
+    setLocationLoading((prev) => ({ ...prev, districts: true }));
+
+    try {
+      const districtOptions = await getDistrictsByDivision(division);
+      setDistricts(districtOptions);
+    } catch (districtLoadError) {
+      console.error('Failed to load districts', districtLoadError);
+      setLocationError((prev) => ({ ...prev, districts: 'District list could not be loaded. You can type it manually.' }));
+    } finally {
+      setLocationLoading((prev) => ({ ...prev, districts: false }));
+    }
+  };
+
+  const handleDistrictChange = async (districtId: string) => {
+    const district = districts.find((item) => item.id === districtId);
+
+    setSelectedDistrictId(districtId);
+    setForm((prev) => ({
+      ...prev,
+      district: district?.name || '',
+      upazila: '',
+    }));
+    setUpazilas([]);
+    setLocationError((prev) => ({ ...prev, upazilas: '' }));
+    setSaved('');
+
+    if (!districtId) {
+      return;
+    }
+
+    setLocationLoading((prev) => ({ ...prev, upazilas: true }));
+
+    try {
+      const upazilaOptions = await getUpazilasByDistrictId(districtId);
+      setUpazilas(upazilaOptions);
+    } catch (upazilaLoadError) {
+      console.error('Failed to load upazilas', upazilaLoadError);
+      setLocationError((prev) => ({ ...prev, upazilas: 'Upazila list could not be loaded. You can type it manually.' }));
+    } finally {
+      setLocationLoading((prev) => ({ ...prev, upazilas: false }));
+    }
+  };
+
   const handleCancel = () => {
     setForm(buildForm());
     setEditing(false);
     setSaved('');
+    setDistricts([]);
+    setUpazilas([]);
+    setSelectedDistrictId('');
+    setLocationLoading({ districts: false, upazilas: false });
+    setLocationError({ districts: '', upazilas: '' });
     onCancelEdit?.();
   };
 
@@ -69,7 +231,6 @@ export default function RoleProfileEditor({
     setSaved(result.success ? 'Profile updated successfully.' : 'Failed to update profile.');
     if (result.success) {
       setEditing(false);
-      window.setTimeout(() => window.location.reload(), 400);
     }
   };
 
@@ -78,7 +239,7 @@ export default function RoleProfileEditor({
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <SectionHeader title={title} subtitle={subtitle} />
         {!editing ? (
-          <button type="button" className="btn-outline" onClick={() => setEditing(true)}>
+          <button type="button" className="btn-outline" onClick={handleStartEdit}>
             Edit Profile
           </button>
         ) : (
@@ -113,15 +274,54 @@ export default function RoleProfileEditor({
           </label>
           <label className="block">
             <span className="form-label">Division</span>
-            <input className="input-field mt-2 disabled:bg-gray-50 disabled:text-gray-500" disabled={!editing} value={form.division} onChange={(e) => updateField('division', e.target.value)} />
+            <select className="input-field mt-2 disabled:bg-gray-50 disabled:text-gray-500" disabled={!editing} value={form.division} onChange={(e) => void handleDivisionChange(e.target.value)}>
+              <option value="">Select division</option>
+              {DIVISIONS.map((division) => (
+                <option key={division} value={division}>{division}</option>
+              ))}
+            </select>
           </label>
           <label className="block">
             <span className="form-label">District</span>
-            <input className="input-field mt-2 disabled:bg-gray-50 disabled:text-gray-500" disabled={!editing} value={form.district} onChange={(e) => updateField('district', e.target.value)} />
+            {locationLoading.districts || districts.length > 0 ? (
+              <select
+                className="input-field mt-2 disabled:bg-gray-50 disabled:text-gray-500"
+                disabled={!editing || !form.division || locationLoading.districts}
+                value={selectedDistrictId}
+                onChange={(e) => void handleDistrictChange(e.target.value)}
+              >
+                <option value="">
+                  {locationLoading.districts ? 'Loading districts...' : 'Select district'}
+                </option>
+                {districts.map((district) => (
+                  <option key={district.id} value={district.id}>{district.name}</option>
+                ))}
+              </select>
+            ) : (
+              <input className="input-field mt-2 disabled:bg-gray-50 disabled:text-gray-500" disabled={!editing || !form.division} value={form.district} onChange={(e) => updateField('district', e.target.value)} />
+            )}
+            {locationError.districts && <span className="mt-2 block text-xs text-amber-600">{locationError.districts}</span>}
           </label>
           <label className="block">
             <span className="form-label">Upazila / Area</span>
-            <input className="input-field mt-2 disabled:bg-gray-50 disabled:text-gray-500" disabled={!editing} value={form.upazila} onChange={(e) => updateField('upazila', e.target.value)} />
+            {locationLoading.upazilas || upazilas.length > 0 ? (
+              <select
+                className="input-field mt-2 disabled:bg-gray-50 disabled:text-gray-500"
+                disabled={!editing || !form.district || locationLoading.upazilas}
+                value={form.upazila}
+                onChange={(e) => updateField('upazila', e.target.value)}
+              >
+                <option value="">
+                  {locationLoading.upazilas ? 'Loading upazilas...' : 'Select upazila'}
+                </option>
+                {upazilas.map((upazila) => (
+                  <option key={upazila.id} value={upazila.name}>{upazila.name}</option>
+                ))}
+              </select>
+            ) : (
+              <input className="input-field mt-2 disabled:bg-gray-50 disabled:text-gray-500" disabled={!editing || !form.district} value={form.upazila} onChange={(e) => updateField('upazila', e.target.value)} />
+            )}
+            {locationError.upazilas && <span className="mt-2 block text-xs text-amber-600">{locationError.upazilas}</span>}
           </label>
           <label className="block">
             <span className="form-label">Designation</span>

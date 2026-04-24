@@ -3,6 +3,8 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { Leaf, Phone, ArrowRight, ChevronLeft, ShieldCheck, Mail, Rocket, RotateCcw, Upload, X, Lock, Eye, EyeOff } from 'lucide-react';
 import { authService, DEMO_CREDENTIALS, farmerService } from '@/services';
+import type { BdLocationOption } from '@/services/bdLocations';
+import { getDistrictsByDivision, getUpazilasByDistrictId } from '@/services/bdLocations';
 
 type Step = 'email' | 'register' | 'registerSuccess' | 'success';
 
@@ -44,6 +46,73 @@ export default function FarmerLoginPage() {
   const [registrationOtp, setRegistrationOtp] = useState(['', '', '', '', '', '']);
   const [registrationOtpVerified, setRegistrationOtpVerified] = useState(false);
   const [registrationOtpToken, setRegistrationOtpToken] = useState('');
+  const [districts, setDistricts] = useState<BdLocationOption[]>([]);
+  const [upazilas, setUpazilas] = useState<BdLocationOption[]>([]);
+  const [selectedDistrictId, setSelectedDistrictId] = useState('');
+  const [locationLoading, setLocationLoading] = useState({ districts: false, upazilas: false });
+  const [locationError, setLocationError] = useState({ districts: '', upazilas: '' });
+
+  const updateRegistrationForm = (key: keyof typeof registrationForm, value: string) => {
+    setRegistrationForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleDivisionChange = async (division: string) => {
+    setRegistrationForm((prev) => ({
+      ...prev,
+      division,
+      district: '',
+      upazila: '',
+    }));
+    setDistricts([]);
+    setUpazilas([]);
+    setSelectedDistrictId('');
+    setLocationError({ districts: '', upazilas: '' });
+
+    if (!division) {
+      return;
+    }
+
+    setLocationLoading((prev) => ({ ...prev, districts: true }));
+
+    try {
+      const districtOptions = await getDistrictsByDivision(division);
+      setDistricts(districtOptions);
+    } catch (error) {
+      console.error('Failed to load districts', error);
+      setLocationError((prev) => ({ ...prev, districts: 'District list could not be loaded. You can type it manually.' }));
+    } finally {
+      setLocationLoading((prev) => ({ ...prev, districts: false }));
+    }
+  };
+
+  const handleDistrictChange = async (districtId: string) => {
+    const district = districts.find((item) => item.id === districtId);
+
+    setSelectedDistrictId(districtId);
+    setRegistrationForm((prev) => ({
+      ...prev,
+      district: district?.name || '',
+      upazila: '',
+    }));
+    setUpazilas([]);
+    setLocationError((prev) => ({ ...prev, upazilas: '' }));
+
+    if (!districtId) {
+      return;
+    }
+
+    setLocationLoading((prev) => ({ ...prev, upazilas: true }));
+
+    try {
+      const upazilaOptions = await getUpazilasByDistrictId(districtId);
+      setUpazilas(upazilaOptions);
+    } catch (error) {
+      console.error('Failed to load upazilas', error);
+      setLocationError((prev) => ({ ...prev, upazilas: 'Upazila list could not be loaded. You can type it manually.' }));
+    } finally {
+      setLocationLoading((prev) => ({ ...prev, upazilas: false }));
+    }
+  };
 
   const handleQuickDemoFarmer = async () => {
     setLoading(true);
@@ -601,7 +670,7 @@ export default function FarmerLoginPage() {
                     <select
                       className="input-field"
                       value={registrationForm.division}
-                      onChange={(e) => setRegistrationForm({ ...registrationForm, division: e.target.value })}
+                      onChange={(e) => void handleDivisionChange(e.target.value)}
                       required
                     >
                       <option value="">Select division</option>
@@ -612,25 +681,63 @@ export default function FarmerLoginPage() {
                   </div>
                   <div>
                     <label className="block text-sm font-semibold text-gray-700 mb-2">District</label>
-                    <input
-                      type="text"
-                      className="input-field"
-                      placeholder="District"
-                      value={registrationForm.district}
-                      onChange={(e) => setRegistrationForm({ ...registrationForm, district: e.target.value })}
-                      required
-                    />
+                    {locationLoading.districts || districts.length > 0 ? (
+                      <select
+                        className="input-field"
+                        value={selectedDistrictId}
+                        onChange={(e) => void handleDistrictChange(e.target.value)}
+                        disabled={!registrationForm.division || locationLoading.districts}
+                        required
+                      >
+                        <option value="">
+                          {locationLoading.districts ? 'Loading districts...' : 'Select district'}
+                        </option>
+                        {districts.map((district) => (
+                          <option key={district.id} value={district.id}>{district.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        className="input-field"
+                        placeholder="District"
+                        value={registrationForm.district}
+                        onChange={(e) => updateRegistrationForm('district', e.target.value)}
+                        disabled={!registrationForm.division}
+                        required
+                      />
+                    )}
+                    {locationError.districts && <p className="mt-2 text-xs text-amber-600">{locationError.districts}</p>}
                   </div>
                   <div>
                     <label className="block text-sm font-semibold text-gray-700 mb-2">Upazila</label>
-                    <input
-                      type="text"
-                      className="input-field"
-                      placeholder="Upazila"
-                      value={registrationForm.upazila}
-                      onChange={(e) => setRegistrationForm({ ...registrationForm, upazila: e.target.value })}
-                      required
-                    />
+                    {locationLoading.upazilas || upazilas.length > 0 ? (
+                      <select
+                        className="input-field"
+                        value={registrationForm.upazila}
+                        onChange={(e) => updateRegistrationForm('upazila', e.target.value)}
+                        disabled={!registrationForm.district || locationLoading.upazilas}
+                        required
+                      >
+                        <option value="">
+                          {locationLoading.upazilas ? 'Loading upazilas...' : 'Select upazila'}
+                        </option>
+                        {upazilas.map((upazila) => (
+                          <option key={upazila.id} value={upazila.name}>{upazila.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        className="input-field"
+                        placeholder="Upazila"
+                        value={registrationForm.upazila}
+                        onChange={(e) => updateRegistrationForm('upazila', e.target.value)}
+                        disabled={!registrationForm.district}
+                        required
+                      />
+                    )}
+                    {locationError.upazilas && <p className="mt-2 text-xs text-amber-600">{locationError.upazilas}</p>}
                   </div>
                 </div>
 

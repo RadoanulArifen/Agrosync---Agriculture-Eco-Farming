@@ -22,21 +22,34 @@ export const FARMER_NAV_ITEMS: NavItem[] = [
 ];
 
 export function useFarmerContext() {
-  const [farmer, setFarmer] = useState<Farmer | null>(null);
+  const resolveFarmer = () => authService.getCurrentFarmer() ?? null;
+
+  const [farmer, setFarmer] = useState<Farmer | null>(() => resolveFarmer());
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const currentFarmer = authService.getCurrentFarmer() ?? null;
-    setFarmer(currentFarmer);
+    const syncFarmer = () => {
+      const currentFarmer = resolveFarmer();
+      setFarmer(currentFarmer);
+      return currentFarmer;
+    };
+
+    const currentFarmer = syncFarmer();
 
     if (!currentFarmer) {
       setLoading(false);
       return;
     }
 
-    const syncNotificationCount = () => {
-      notificationService.getNotifications(currentFarmer.id)
+    const syncNotificationCount = (targetFarmer = syncFarmer()) => {
+      if (!targetFarmer) {
+        setUnreadNotifications(0);
+        setLoading(false);
+        return;
+      }
+
+      notificationService.getNotifications(targetFarmer.id)
         .then((notifications) => {
           setUnreadNotifications(notifications.filter((notification) => !notification.isRead).length);
         })
@@ -46,7 +59,11 @@ export function useFarmerContext() {
     syncNotificationCount();
 
     const handleStorage = (event: StorageEvent) => {
-      if (event.key && event.key !== 'ams_notifications') return;
+      if (event.key && !['ams_notifications', 'ams_role_users', 'ams_current_role_user_id', 'ams_current_farmer_id'].includes(event.key)) return;
+      syncNotificationCount();
+    };
+
+    const handleUserSessionUpdated = () => {
       syncNotificationCount();
     };
 
@@ -57,11 +74,13 @@ export function useFarmerContext() {
     window.addEventListener('storage', handleStorage);
     window.addEventListener('focus', handleNotificationsUpdated);
     window.addEventListener('ams:notifications-updated', handleNotificationsUpdated);
+    window.addEventListener('ams:user-session-updated', handleUserSessionUpdated);
 
     return () => {
       window.removeEventListener('storage', handleStorage);
       window.removeEventListener('focus', handleNotificationsUpdated);
       window.removeEventListener('ams:notifications-updated', handleNotificationsUpdated);
+      window.removeEventListener('ams:user-session-updated', handleUserSessionUpdated);
     };
   }, []);
 

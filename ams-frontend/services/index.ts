@@ -24,6 +24,7 @@ const delay = (ms = 500) => new Promise((res) => setTimeout(res, ms));
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') || '';
 const API_V1 = API_BASE_URL ? `${API_BASE_URL}/api/v1` : '';
 const NOTIFICATIONS_UPDATED_EVENT = 'ams:notifications-updated';
+const USER_SESSION_UPDATED_EVENT = 'ams:user-session-updated';
 
 async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!API_V1) {
@@ -272,6 +273,11 @@ const persistStorageItem = (key: string, value: string, label: string) => {
   }
 };
 
+const notifyUserSessionUpdated = () => {
+  if (!canUseStorage()) return;
+  window.dispatchEvent(new CustomEvent(USER_SESSION_UPDATED_EVENT));
+};
+
 export const DEMO_CREDENTIALS: Record<ManagedUserRole, { email: string; password: string; label: string }> = {
   admin: { email: 'admin@ams.com.bd', password: 'password123', label: 'Admin' },
   officer: { email: 'rahim@dae.gov.bd', password: 'password123', label: 'Officer' },
@@ -405,6 +411,7 @@ const writeRoleUsersStore = (users: DashboardRoleUser[]) => {
     persistStorageItem(ROLE_USERS_STORAGE_KEY, JSON.stringify(roleUsersStore), 'role users store');
   }
   syncFarmersFromRoleUsers(roleUsersStore);
+  notifyUserSessionUpdated();
 };
 
 const readAdvisoryCasesStore = (): AdvisoryCase[] => {
@@ -809,18 +816,21 @@ const setCurrentFarmerId = (farmerId: string) => {
   if (canUseStorage()) {
     window.localStorage.setItem(CURRENT_FARMER_STORAGE_KEY, farmerId);
   }
+  notifyUserSessionUpdated();
 };
 
 const setCurrentRoleUserId = (userId: string) => {
   if (canUseStorage()) {
     window.localStorage.setItem(CURRENT_ROLE_USER_STORAGE_KEY, userId);
   }
+  notifyUserSessionUpdated();
 };
 
 const clearCurrentSession = () => {
   if (!canUseStorage()) return;
   window.localStorage.removeItem(CURRENT_ROLE_USER_STORAGE_KEY);
   window.localStorage.removeItem(CURRENT_FARMER_STORAGE_KEY);
+  notifyUserSessionUpdated();
 };
 
 const getCurrentFarmer = (): Farmer | undefined => {
@@ -1138,10 +1148,7 @@ export const authService = {
 
     writeRoleUsersStore(updatedUsers);
     if (updatedUser) {
-      setCurrentRoleUserId(updatedUser.id);
-      if (updatedUser.role === 'farmer') {
-        setCurrentFarmerId(updatedUser.id);
-      }
+      persistApiUserSession(updatedUser);
     }
 
     return { success: Boolean(updatedUser), user: updatedUser };
