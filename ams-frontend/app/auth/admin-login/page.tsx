@@ -323,7 +323,7 @@ function AdminLoginContent() {
     const passwordResult = await authService.adminLogin(email, password, selectedRole);
     if (!passwordResult.success) {
       setLoading(false);
-      setError('Invalid email or password for the selected role.');
+      setError(passwordResult.message || 'Invalid email or password for the selected role.');
       return;
     }
 

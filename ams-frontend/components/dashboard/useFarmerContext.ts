@@ -24,9 +24,11 @@ export const FARMER_NAV_ITEMS: NavItem[] = [
 export function useFarmerContext() {
   const resolveFarmer = () => authService.getCurrentFarmer() ?? null;
 
-  const [farmer, setFarmer] = useState<Farmer | null>(() => resolveFarmer());
+  const [farmer, setFarmer] = useState<Farmer | null>(() => (
+    typeof window === 'undefined' ? null : resolveFarmer()
+  ));
   const [unreadNotifications, setUnreadNotifications] = useState(0);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => typeof window === 'undefined');
 
   useEffect(() => {
     const syncFarmer = () => {

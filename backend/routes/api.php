@@ -13,10 +13,13 @@ Route::middleware(ApiCors::class)->prefix('v1')->group(function () {
     Route::post('/auth/register-role', [AgroSyncController::class, 'registerRoleUser']);
 
     Route::get('/users', [AgroSyncController::class, 'users']);
+    Route::patch('/users/{userId}', [AgroSyncController::class, 'updateUserProfile']);
+    Route::patch('/users/{userId}/password', [AgroSyncController::class, 'changePassword']);
     Route::get('/farmers', [AgroSyncController::class, 'farmers']);
     Route::get('/advisory-cases', [AgroSyncController::class, 'advisoryCases']);
     Route::post('/advisory-cases', [AgroSyncController::class, 'submitAdvisory']);
     Route::post('/advisory-cases/{caseId}/respond', [AgroSyncController::class, 'respondToCase']);
+    Route::get('/advisory-cases/regional/stats', [AgroSyncController::class, 'regionalAdvisoryStats']);
 
     Route::get('/products', [AgroSyncController::class, 'products']);
     Route::post('/products', [AgroSyncController::class, 'createProduct']);

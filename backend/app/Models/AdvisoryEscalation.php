@@ -18,3 +18,4 @@ class AdvisoryEscalation extends Model
         return $this->belongsTo(AdvisoryCase::class, 'case_id');
     }
 }
+

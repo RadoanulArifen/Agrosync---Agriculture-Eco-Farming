@@ -9,6 +9,7 @@ import type {
   Farmer, Product, Order, AdvisoryCase, CropListing,
   CropPrice, WeatherForecast, Notification, BlogPost, ProductCategory,
   Testimonial, AdminStats, Tenant, Officer, DashboardRoleUser, ManagedUserRole, CropDeal,
+  UserSettings, AdvisoryPriority,
 } from '@/types';
 
 import {
@@ -25,36 +26,81 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') || '';
 const API_V1 = API_BASE_URL ? `${API_BASE_URL}/api/v1` : '';
 const NOTIFICATIONS_UPDATED_EVENT = 'ams:notifications-updated';
 const USER_SESSION_UPDATED_EVENT = 'ams:user-session-updated';
+const DEFAULT_USER_SETTINGS: UserSettings = {
+  emailNotifications: true,
+  pushNotifications: true,
+  outbreakWarnings: true,
+  urgentAdvisory: true,
+  newCaseAlert: true,
+};
+
+class ApiRequestError extends Error {
+  status?: number;
+
+  isNetworkError: boolean;
+
+  constructor(message: string, options: { status?: number; isNetworkError?: boolean } = {}) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = options.status;
+    this.isNetworkError = Boolean(options.isNetworkError);
+  }
+}
+
+const shouldFallbackToMock = (error: unknown) => {
+  if (!API_V1) return true;
+  return error instanceof ApiRequestError && error.isNetworkError;
+};
 
 async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!API_V1) {
-    throw new Error('Backend API URL is not configured.');
+    throw new ApiRequestError('Backend API URL is not configured.', { isNetworkError: true });
   }
 
-  const response = await fetch(`${API_V1}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_V1}${path}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+      },
+    });
+  } catch (error) {
+    throw new ApiRequestError(
+      error instanceof Error ? error.message : 'Backend API request failed.',
+      { isNetworkError: true },
+    );
+  }
+
+  let payload: { status?: 'success' | 'error'; data?: T; message?: string } | undefined;
+  try {
+    payload = await response.json() as { status?: 'success' | 'error'; data?: T; message?: string };
+  } catch {
+    payload = undefined;
+  }
 
   if (!response.ok) {
-    throw new Error(`Backend API request failed: ${response.status}`);
+    throw new ApiRequestError(
+      payload?.message || `Backend API request failed: ${response.status}`,
+      { status: response.status },
+    );
   }
 
-  const payload = await response.json() as { status: 'success' | 'error'; data?: T; message?: string };
-  if (payload.status === 'error') {
-    throw new Error(payload.message || 'Backend API request failed.');
+  if (payload?.status === 'error') {
+    throw new ApiRequestError(payload.message || 'Backend API request failed.', { status: response.status });
   }
 
-  return payload.data as T;
+  return payload?.data as T;
 }
 
 async function apiOrMock<T>(path: string, fallback: () => Promise<T> | T, options: RequestInit = {}): Promise<T> {
   try {
     return await apiRequest<T>(path, options);
   } catch (error) {
+    if (!shouldFallbackToMock(error)) {
+      throw error;
+    }
     console.warn(`[API] Falling back to local mock for ${path}:`, error);
     return fallback();
   }
@@ -233,10 +279,16 @@ const ADMIN_OFFICER_META_STORAGE_KEY = 'ams_admin_officer_meta';
 const ADMIN_VENDOR_META_STORAGE_KEY = 'ams_admin_vendor_meta';
 const ADMIN_CASE_META_STORAGE_KEY = 'ams_admin_case_meta';
 const ADMIN_AUDIT_LOG_STORAGE_KEY = 'ams_admin_audit_logs';
+const DEMO_ADVISORY_CASE_IDS = new Set([
+  'ADV-2026-0000001',
+  'ADV-2026-0000002',
+  'ADV-2026-0000003',
+  'ADV-2026-0000004',
+]);
 
 let farmersStore: Farmer[] = [...MOCK_FARMERS];
 let roleUsersStore: DashboardRoleUser[] = [];
-let advisoryCasesStore: AdvisoryCase[] = [...MOCK_ADVISORY_CASES];
+let advisoryCasesStore: AdvisoryCase[] = [];
 let notificationsStore: Notification[] = [...MOCK_NOTIFICATIONS];
 let ordersStore: Order[] = [...MOCK_ORDERS];
 let productsStore: Product[] = [...MOCK_PRODUCTS];
@@ -258,6 +310,10 @@ let cropDealsStore: CropDeal[] = [
   },
 ];
 let tenantsStore: Tenant[] = [...MOCK_TENANTS];
+
+const sanitizeAdvisoryCases = (cases: AdvisoryCase[]) => (
+  cases.filter((item) => !DEMO_ADVISORY_CASE_IDS.has(item.id))
+);
 
 const canUseStorage = () => typeof window !== 'undefined';
 
@@ -423,7 +479,7 @@ const readAdvisoryCasesStore = (): AdvisoryCase[] => {
   try {
     const parsed = JSON.parse(saved) as AdvisoryCase[];
     if (Array.isArray(parsed) && parsed.length > 0) {
-      advisoryCasesStore = parsed;
+      advisoryCasesStore = sanitizeAdvisoryCases(parsed);
     }
   } catch (error) {
     console.error('[MOCK] Failed to read advisory cases store', error);
@@ -433,10 +489,24 @@ const readAdvisoryCasesStore = (): AdvisoryCase[] => {
 };
 
 const writeAdvisoryCasesStore = (cases: AdvisoryCase[]) => {
-  advisoryCasesStore = cases;
+  advisoryCasesStore = sanitizeAdvisoryCases(cases);
   if (canUseStorage()) {
     persistStorageItem(ADVISORY_CASES_STORAGE_KEY, JSON.stringify(advisoryCasesStore), 'advisory cases store');
   }
+};
+
+const mergeAdvisoryCases = (cases: AdvisoryCase[]) => {
+  const advisoryCaseMap = new Map<string, AdvisoryCase>();
+
+  [...readAdvisoryCasesStore(), ...cases].forEach((item) => {
+    advisoryCaseMap.set(item.id, item);
+  });
+
+  writeAdvisoryCasesStore(
+    Array.from(advisoryCaseMap.values()).sort((left, right) => (
+      new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
+    )),
+  );
 };
 
 const readNotificationsStore = (): Notification[] => {
@@ -750,39 +820,21 @@ const writeCartStore = (farmerId: string, items: { productId: string; quantity: 
   window.localStorage.setItem(getCartStorageKey(farmerId), JSON.stringify(items));
 };
 
-const readUserSettingsStore = (): Record<string, {
-  emailNotifications: boolean;
-  pushNotifications: boolean;
-  outbreakWarnings: boolean;
-  urgentAdvisory: boolean;
-  newCaseAlert: boolean;
-}> => {
+const readUserSettingsStore = (): Record<string, UserSettings> => {
   if (!canUseStorage()) return {};
 
   const saved = window.localStorage.getItem(USER_SETTINGS_STORAGE_KEY);
   if (!saved) return {};
 
   try {
-    return JSON.parse(saved) as Record<string, {
-      emailNotifications: boolean;
-      pushNotifications: boolean;
-      outbreakWarnings: boolean;
-      urgentAdvisory: boolean;
-      newCaseAlert: boolean;
-    }>;
+    return JSON.parse(saved) as Record<string, UserSettings>;
   } catch (error) {
     console.error('[MOCK] Failed to read user settings store', error);
     return {};
   }
 };
 
-const writeUserSettingsStore = (settings: Record<string, {
-  emailNotifications: boolean;
-  pushNotifications: boolean;
-  outbreakWarnings: boolean;
-  urgentAdvisory: boolean;
-  newCaseAlert: boolean;
-}>) => {
+const writeUserSettingsStore = (settings: Record<string, UserSettings>) => {
   if (!canUseStorage()) return;
   window.localStorage.setItem(USER_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
 };
@@ -1064,7 +1116,7 @@ export const authService = {
   async adminLogin(
     email: string,
     password: string,
-    role?: ManagedUserRole,
+  role?: ManagedUserRole,
   ): Promise<{ success: boolean; role?: string; token?: string; requiresOtp?: boolean; otpToken?: string; message?: string }> {
     try {
       const result = await apiRequest<{ success: boolean; role?: string; token?: string; user?: DashboardRoleUser; message?: string }>(
@@ -1077,6 +1129,9 @@ export const authService = {
       }
       return result;
     } catch (error) {
+      if (!shouldFallbackToMock(error)) {
+        return { success: false, message: error instanceof Error ? error.message : 'Login failed.' };
+      }
       console.warn('[API] Falling back to local mock for /auth/login:', error);
     }
 
@@ -1106,6 +1161,9 @@ export const authService = {
       if (result.success) persistApiUserSession(result.user);
       return result;
     } catch (error) {
+      if (!shouldFallbackToMock(error)) {
+        return { success: false, message: error instanceof Error ? error.message : 'Registration failed.' };
+      }
       console.warn('[API] Falling back to local mock for /auth/register-role:', error);
     }
 
@@ -1136,6 +1194,27 @@ export const authService = {
   },
 
   async updateRoleUser(id: string, data: Partial<DashboardRoleUser>): Promise<{ success: boolean; user?: DashboardRoleUser }> {
+    try {
+      const result = await apiRequest<{ success: boolean; user?: DashboardRoleUser }>(`/users/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(data),
+      });
+
+      if (result.success && result.user) {
+        persistApiUserSession(result.user);
+      }
+
+      return result;
+    } catch (error) {
+      if (!shouldFallbackToMock(error)) {
+        throw error;
+      }
+      console.warn('[API] Falling back to local mock for user profile update:', error);
+    }
+
     await delay(500);
     const users = readRoleUsersStore();
     let updatedUser: DashboardRoleUser | undefined;
@@ -1155,6 +1234,27 @@ export const authService = {
   },
 
   async changePassword(userId: string, currentPassword: string, nextPassword: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      const result = await apiRequest<{ success: boolean }>(`/users/${encodeURIComponent(userId)}/password`, {
+        method: 'PATCH',
+        body: JSON.stringify({ currentPassword, nextPassword }),
+      });
+
+      if (result.success) {
+        const users = readRoleUsersStore();
+        writeRoleUsersStore(users.map((item) => (
+          item.id === userId ? { ...item, password: nextPassword } : item
+        )));
+      }
+
+      return result;
+    } catch (error) {
+      if (!shouldFallbackToMock(error)) {
+        return { success: false, message: error instanceof Error ? error.message : 'Password change failed.' };
+      }
+      console.warn('[API] Falling back to local mock for password change:', error);
+    }
+
     await delay(300);
     const users = readRoleUsersStore();
     const user = users.find((item) => item.id === userId);
@@ -1170,7 +1270,7 @@ export const authService = {
 
   resetDemoData() {
     roleUsersStore = [...DEFAULT_ROLE_USERS];
-    advisoryCasesStore = [...MOCK_ADVISORY_CASES];
+    advisoryCasesStore = [];
     notificationsStore = [...MOCK_NOTIFICATIONS];
     farmersStore = [...MOCK_FARMERS];
     ordersStore = [...MOCK_ORDERS];
@@ -1190,7 +1290,6 @@ export const authService = {
   },
 
   async quickDemoLogin(role: ManagedUserRole): Promise<{ success: boolean; role?: ManagedUserRole }> {
-    this.resetDemoData();
     const credential = DEMO_CREDENTIALS[role];
     const result = await this.adminLogin(credential.email, credential.password, role);
     return { success: result.success, role: result.role as ManagedUserRole | undefined };
@@ -1269,12 +1368,18 @@ export const farmerService = {
 // ============================================================
 export const advisoryService = {
   async getAdvisoryCases(farmerId?: string): Promise<AdvisoryCase[]> {
-    return apiOrMock(`/advisory-cases${farmerId ? `?farmerId=${encodeURIComponent(farmerId)}` : ''}`, async () => {
+    try {
+      const cases = await apiRequest<AdvisoryCase[]>(`/advisory-cases${farmerId ? `?farmerId=${encodeURIComponent(farmerId)}` : ''}`);
+      mergeAdvisoryCases(cases);
+      return farmerId ? cases.filter((item) => item.farmerId === farmerId) : cases;
+    } catch (error) {
+      console.warn(`[API] Falling back to local mock for /advisory-cases${farmerId ? `?farmerId=${encodeURIComponent(farmerId)}` : ''}:`, error);
+    }
+
     await delay();
     const cases = readAdvisoryCasesStore();
     if (farmerId) return cases.filter((c) => c.farmerId === farmerId);
     return cases;
-    });
   },
 
   async getAdvisoryById(id: string): Promise<AdvisoryCase | undefined> {
@@ -1289,9 +1394,31 @@ export const advisoryService = {
     cropType: string;
     description: string;
     photos: string[];
+    priority: AdvisoryPriority;
   }): Promise<{ success: boolean; caseId?: string }> {
+    const farmer = readFarmersStore().find((item) => item.id === data.farmerId);
+
     try {
-      return await apiRequest<{ success: boolean; caseId?: string }>('/advisory-cases', jsonBody(data));
+      const result = await apiRequest<{ success: boolean; caseId?: string }>('/advisory-cases', jsonBody(data));
+
+      if (result.success && result.caseId) {
+        mergeAdvisoryCases([{
+          id: result.caseId,
+          farmerId: data.farmerId,
+          farmerName: farmer?.name ?? 'Farmer',
+          farmerDivision: farmer?.division ?? '',
+          farmerDistrict: farmer?.district ?? '',
+          farmerUpazila: farmer?.upazila ?? '',
+          cropType: data.cropType,
+          description: data.description,
+          photos: data.photos,
+          status: 'pending',
+          priority: data.priority,
+          createdAt: new Date().toISOString(),
+        }]);
+      }
+
+      return result;
     } catch (error) {
       console.warn('[API] Falling back to local mock for /advisory-cases:', error);
     }
@@ -1299,16 +1426,18 @@ export const advisoryService = {
     await delay(1200);
     const year = new Date().getFullYear();
     const caseId = `ADV-${year}-${String(Math.floor(Math.random() * 9999999)).padStart(7, '0')}`;
-    const farmer = readFarmersStore().find((item) => item.id === data.farmerId);
     const newCase: AdvisoryCase = {
       id: caseId,
       farmerId: data.farmerId,
       farmerName: farmer?.name ?? 'Farmer',
+      farmerDivision: farmer?.division ?? '',
       farmerDistrict: farmer?.district ?? '',
+      farmerUpazila: farmer?.upazila ?? '',
       cropType: data.cropType,
       description: data.description,
       photos: data.photos,
       status: 'pending',
+      priority: data.priority,
       createdAt: new Date().toISOString(),
     };
 
@@ -1325,18 +1454,61 @@ export const advisoryService = {
       createdAt: new Date().toISOString(),
     });
 
+    const officers = readRoleUsersStore().filter((item) => item.role === 'officer');
+    const settingsStore = readUserSettingsStore();
+    const location = [farmer?.upazila, farmer?.district, farmer?.division].filter(Boolean).join(', ');
+
+    officers.forEach((officer) => {
+      const coveredDistricts = (officer.regionDistricts || []).map((district) => district.toLowerCase());
+      const matchesDistrict = !farmer?.district || coveredDistricts.includes(farmer.district.toLowerCase());
+      if (!matchesDistrict) return;
+
+      const preferences = settingsStore[officer.id] || DEFAULT_USER_SETTINGS;
+      const shouldNotify = data.priority === 'urgent' ? preferences.urgentAdvisory : preferences.newCaseAlert;
+      if (!shouldNotify) return;
+
+      addNotification({
+        id: `notif_${Date.now()}_${officer.id}`,
+        userId: officer.id,
+        type: 'advisory',
+        title: data.priority === 'urgent' ? 'Urgent New Case Alert' : 'New Case Alert',
+        message: `${data.priority === 'urgent' ? 'Urgent' : 'Normal'} ${data.cropType} advisory ${caseId} submitted from ${location}.`,
+        channel: ['push', 'email'],
+        isRead: false,
+        createdAt: new Date().toISOString(),
+      });
+    });
+
     return { success: true, caseId };
   },
 
   async respondToCase(caseId: string, response: string, officerId: string): Promise<{ success: boolean }> {
+    const officer = readRoleUsersStore().find((user) => user.id === officerId || user.officerId === officerId);
+
     try {
-      return await apiRequest<{ success: boolean }>(`/advisory-cases/${encodeURIComponent(caseId)}/respond`, jsonBody({ response, officerId }));
+      const result = await apiRequest<{ success: boolean }>(`/advisory-cases/${encodeURIComponent(caseId)}/respond`, jsonBody({ response, officerId }));
+
+      if (result.success) {
+        writeAdvisoryCasesStore(readAdvisoryCasesStore().map((item) => (
+          item.id === caseId
+            ? {
+              ...item,
+              status: 'responded' as const,
+              officerId: officer?.id ?? officerId,
+              officerName: officer?.name ?? 'Officer',
+              officerResponse: response,
+              respondedAt: new Date().toISOString(),
+            }
+            : item
+        )));
+      }
+
+      return result;
     } catch (error) {
       console.warn('[API] Falling back to local mock for advisory response:', error);
     }
 
     await delay(800);
-    const officer = readRoleUsersStore().find((user) => user.id === officerId || user.officerId === officerId);
     let farmerId = '';
 
     const updatedCases = readAdvisoryCasesStore().map((item) => {
@@ -1375,6 +1547,49 @@ export const advisoryService = {
     await delay();
     return readAdvisoryCasesStore().filter((c) => c.officerId === officerId || c.status === 'pending' || c.status === 'assigned' || c.status === 'ai_analyzed');
     }).then((cases) => cases.filter((c) => c.officerId === officerId || c.status === 'pending' || c.status === 'assigned' || c.status === 'ai_analyzed'));
+  },
+
+  async getRegionalStats(): Promise<Array<{ division: string; district: string; total_cases: number; pending_cases: number; responded_cases: number; resolved_cases: number }>> {
+    return apiOrMock('/advisory-cases/regional/stats', async () => {
+      await delay();
+      const cases = readAdvisoryCasesStore();
+      const statsMap = new Map<string, { division: string; district: string; total: number; pending: number; responded: number; resolved: number }>();
+      
+      // Import district mapping
+      const { bangladeshDistricts } = await import('@/utils/bangladeshDistricts');
+      
+      cases.forEach((c) => {
+        const district = c.farmerDistrict || 'Unknown';
+        const districtInfo = bangladeshDistricts.find(d => d.name.toLowerCase() === district.toLowerCase());
+        const division = c.farmerDivision || districtInfo?.division || 'Unknown';
+        const key = `${division}-${district}`;
+        
+        if (!statsMap.has(key)) {
+          statsMap.set(key, {
+            division,
+            district,
+            total: 0,
+            pending: 0,
+            responded: 0,
+            resolved: 0,
+          });
+        }
+        const stat = statsMap.get(key)!;
+        stat.total += 1;
+        if (c.status === 'pending') stat.pending += 1;
+        if (c.status === 'responded') stat.responded += 1;
+        if (c.status === 'closed') stat.resolved += 1;
+      });
+
+      return Array.from(statsMap.values()).map(s => ({
+        division: s.division,
+        district: s.district,
+        total_cases: s.total,
+        pending_cases: s.pending,
+        responded_cases: s.responded,
+        resolved_cases: s.resolved,
+      }));
+    });
   },
 };
 
@@ -1712,27 +1927,15 @@ export const cartService = {
 };
 
 export const userSettingsService = {
-  async getSettings(userId: string) {
+  async getSettings(userId: string): Promise<UserSettings> {
     return apiOrMock(`/settings/${encodeURIComponent(userId)}`, async () => {
     await delay(150);
     const store = readUserSettingsStore();
-    return store[userId] || {
-      emailNotifications: true,
-      pushNotifications: true,
-      outbreakWarnings: true,
-      urgentAdvisory: true,
-      newCaseAlert: true,
-    };
+    return store[userId] || DEFAULT_USER_SETTINGS;
     });
   },
 
-  async updateSettings(userId: string, settings: {
-    emailNotifications: boolean;
-    pushNotifications: boolean;
-    outbreakWarnings: boolean;
-    urgentAdvisory: boolean;
-    newCaseAlert: boolean;
-  }) {
+  async updateSettings(userId: string, settings: UserSettings) {
     try {
       return await apiRequest<{ success: boolean }>(`/settings/${encodeURIComponent(userId)}`, { method: 'PUT', body: JSON.stringify(settings) });
     } catch (error) {
@@ -1962,7 +2165,11 @@ export const notificationService = {
 
   async markAsRead(notificationId: string): Promise<{ success: boolean }> {
     try {
-      return await apiRequest<{ success: boolean }>(`/notifications/${encodeURIComponent(notificationId)}/read`, { method: 'PATCH' });
+      const result = await apiRequest<{ success: boolean }>(`/notifications/${encodeURIComponent(notificationId)}/read`, { method: 'PATCH' });
+      if (canUseStorage()) {
+        window.dispatchEvent(new CustomEvent(NOTIFICATIONS_UPDATED_EVENT));
+      }
+      return result;
     } catch (error) {
       console.warn('[API] Falling back to local mock for notification read:', error);
     }
@@ -1977,7 +2184,11 @@ export const notificationService = {
 
   async markAllAsRead(userId: string): Promise<{ success: boolean }> {
     try {
-      return await apiRequest<{ success: boolean }>(`/notifications/user/${encodeURIComponent(userId)}/read-all`, { method: 'PATCH' });
+      const result = await apiRequest<{ success: boolean }>(`/notifications/user/${encodeURIComponent(userId)}/read-all`, { method: 'PATCH' });
+      if (canUseStorage()) {
+        window.dispatchEvent(new CustomEvent(NOTIFICATIONS_UPDATED_EVENT));
+      }
+      return result;
     } catch (error) {
       console.warn('[API] Falling back to local mock for notifications read all:', error);
     }

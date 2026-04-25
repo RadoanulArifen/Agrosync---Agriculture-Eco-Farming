@@ -24,7 +24,9 @@ export default function OfficerSettingsPage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    userSettingsService.getSettings(user.id).then(setSettings);
+    userSettingsService.getSettings(user.id).then(setSettings).catch(() => {
+      setError('Failed to load notification settings.');
+    });
   }, [user.id]);
 
   const handlePasswordChange = async (e: React.FormEvent) => {
@@ -50,8 +52,13 @@ export default function OfficerSettingsPage() {
   const handleSettingSave = async () => {
     setMessage('');
     setError('');
-    await userSettingsService.updateSettings(user.id, settings);
-    setMessage('Notification settings saved successfully.');
+    try {
+      await userSettingsService.updateSettings(user.id, settings);
+      setMessage('Notification settings saved successfully.');
+    } catch (saveError) {
+      console.error('[OfficerSettings] Failed to save settings', saveError);
+      setError('Notification settings save failed.');
+    }
   };
 
   return (

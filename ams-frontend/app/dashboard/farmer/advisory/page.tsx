@@ -8,7 +8,7 @@ import {
 } from '@/components/dashboard/DashboardComponents';
 import { FARMER_NAV_ITEMS, useFarmerContext } from '@/components/dashboard/useFarmerContext';
 import { advisoryService } from '@/services';
-import type { AdvisoryCase } from '@/types';
+import type { AdvisoryCase, AdvisoryPriority } from '@/types';
 import { formatDateTime } from '@/utils';
 
 export default function FarmerAdvisoryPage() {
@@ -18,7 +18,7 @@ export default function FarmerAdvisoryPage() {
   const [submitting, setSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
   const [photoPreview, setPhotoPreview] = useState('');
-  const [form, setForm] = useState({ cropType: '', description: '' });
+  const [form, setForm] = useState<{ cropType: string; priority: AdvisoryPriority; description: string }>({ cropType: '', priority: 'normal', description: '' });
 
   const compressImage = (file: File) => new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -90,6 +90,7 @@ export default function FarmerAdvisoryPage() {
     const response = await advisoryService.submitAdvisory({
       farmerId: farmer.id,
       cropType: form.cropType,
+      priority: form.priority,
       description: form.description,
       photos: photoPreview ? [photoPreview] : [],
     });
@@ -99,7 +100,7 @@ export default function FarmerAdvisoryPage() {
       setSuccessMessage(`Advisory submitted successfully. Case ID: ${response.caseId}`);
       const latestCases = await advisoryService.getAdvisoryCases(farmer.id);
       setCases(latestCases);
-      setForm({ cropType: '', description: '' });
+      setForm({ cropType: '', priority: 'normal', description: '' });
       setPhotoPreview('');
       setShowForm(false);
       setTimeout(() => setSuccessMessage(''), 3000);
@@ -135,6 +136,15 @@ export default function FarmerAdvisoryPage() {
               >
                 <option value="">Select crop type</option>
                 {farmer.cropTypes.map((crop) => <option key={crop} value={crop}>{crop}</option>)}
+              </select>
+              <select
+                className="input-field"
+                value={form.priority}
+                onChange={(e) => setForm({ ...form, priority: e.target.value as 'normal' | 'urgent' })}
+                required
+              >
+                <option value="normal">Normal advisory</option>
+                <option value="urgent">Urgent advisory</option>
               </select>
               <textarea
                 className="input-field resize-none"
@@ -191,7 +201,12 @@ export default function FarmerAdvisoryPage() {
                     <div className="font-mono text-xs text-gray-400">{caseItem.id}</div>
                     <h3 className="font-bold text-gray-800">{caseItem.cropType}</h3>
                   </div>
-                  <StatusBadge status={caseItem.status} />
+                  <div className="flex flex-col items-end gap-2">
+                    <span className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-wide ${caseItem.priority === 'urgent' ? 'bg-red-50 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
+                      {caseItem.priority === 'urgent' ? 'Urgent' : 'Normal'}
+                    </span>
+                    <StatusBadge status={caseItem.status} />
+                  </div>
                 </div>
                 <p className="text-sm text-gray-500 mb-3">{caseItem.description}</p>
                 {caseItem.photos?.[0] && (

@@ -78,16 +78,20 @@ export interface DashboardRoleUser extends User {
 // ADVISORY TYPES
 // ============================================================
 export type AdvisoryStatus = 'pending' | 'ai_analyzed' | 'assigned' | 'responded' | 'closed' | 'escalated';
+export type AdvisoryPriority = 'normal' | 'urgent';
 
 export interface AdvisoryCase {
   id: string; // ADV-YYYY-XXXXXXX
   farmerId: string;
   farmerName: string;
+  farmerDivision?: string;
   farmerDistrict: string;
+  farmerUpazila?: string;
   cropType: string;
   description: string;
   photos: string[];
   status: AdvisoryStatus;
+  priority?: AdvisoryPriority;
   aiDiagnosis?: string;
   aiConfidence?: number;
   officerId?: string;
@@ -250,6 +254,14 @@ export interface Notification {
   channel: NotificationChannel[];
   isRead: boolean;
   createdAt: string;
+}
+
+export interface UserSettings {
+  emailNotifications: boolean;
+  pushNotifications: boolean;
+  outbreakWarnings: boolean;
+  urgentAdvisory: boolean;
+  newCaseAlert: boolean;
 }
 
 // ============================================================

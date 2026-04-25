@@ -23,7 +23,9 @@ export default function CompanySettingsPage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    userSettingsService.getSettings(user.id).then(setSettings);
+    userSettingsService.getSettings(user.id).then(setSettings).catch(() => {
+      setError('Failed to load notification settings.');
+    });
   }, [user.id]);
 
   const handlePasswordChange = async (event: React.FormEvent) => {
@@ -47,9 +49,14 @@ export default function CompanySettingsPage() {
   };
 
   const handleSaveSettings = async () => {
-    await userSettingsService.updateSettings(user.id, settings);
-    setMessage('Notification settings saved successfully.');
-    setError('');
+    try {
+      await userSettingsService.updateSettings(user.id, settings);
+      setMessage('Notification settings saved successfully.');
+      setError('');
+    } catch (saveError) {
+      console.error('[CompanySettings] Failed to save settings', saveError);
+      setError('Notification settings save failed.');
+    }
   };
 
   return (

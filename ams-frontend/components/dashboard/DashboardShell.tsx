@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import {
   Leaf, Bell, Search, Menu, X, LogOut, ChevronDown,
   type LucideIcon,
@@ -33,7 +33,6 @@ export default function DashboardShell({
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [liveNotificationCount, setLiveNotificationCount] = useState(notificationCount);
   const pathname = usePathname();
-  const router = useRouter();
   const profileHref = DASHBOARD_PROFILE_ROUTES[role as keyof typeof DASHBOARD_PROFILE_ROUTES] || '/';
   const notificationHref = DASHBOARD_NOTIFICATION_ROUTES[role as keyof typeof DASHBOARD_NOTIFICATION_ROUTES] || '/';
   const loginHref = role === 'farmer' ? '/auth/farmer-login' : '/auth/admin-login';
@@ -50,8 +49,7 @@ export default function DashboardShell({
     authService.logout();
     setUserMenuOpen(false);
     setSidebarOpen(false);
-    router.push(loginHref);
-    router.refresh();
+    window.location.href = loginHref;
   };
 
   const [subtitleLabel, subtitleValue] = userSubtitle.includes(':')

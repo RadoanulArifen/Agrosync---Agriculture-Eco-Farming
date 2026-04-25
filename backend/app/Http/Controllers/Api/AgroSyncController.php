@@ -366,11 +366,14 @@ class AgroSyncController extends Controller
             'id' => $case->id,
             'farmerId' => $case->farmer_id,
             'farmerName' => $farmer?->name_en ?? 'Farmer',
-            'farmerDistrict' => $farmer?->district ?? '',
+            'farmerDivision' => $case->farmer_division ?? $farmer?->division ?? '',
+            'farmerDistrict' => $case->farmer_district ?? $farmer?->district ?? '',
+            'farmerUpazila' => $case->farmer_upazila ?? $farmer?->upazila ?? '',
             'cropType' => $case->crop_type,
             'description' => $case->description,
             'photos' => $this->arrayValue($case->photos),
             'status' => $case->status,
+            'priority' => $case->priority ?: 'normal',
             'aiDiagnosis' => $case->ai_diagnosis,
             'aiConfidence' => $case->ai_confidence ? (int) $case->ai_confidence : null,
             'officerId' => $case->officer_id,
@@ -382,6 +385,99 @@ class AgroSyncController extends Controller
             'respondedAt' => $case->responded_at,
             'closedAt' => $case->resolved_at,
         ];
+    }
+
+    private function demoAdvisoryCaseIds(): array
+    {
+        return [
+            'ADV-2026-0000001',
+            'ADV-2026-0000002',
+            'ADV-2026-0000003',
+            'ADV-2026-0000004',
+        ];
+    }
+
+    public function updateUserProfile(Request $request, string $userId): JsonResponse
+    {
+        $user = DB::table('users')->where('public_id', $userId)->first();
+
+        if (! $user) {
+            return $this->fail('User not found.', 404);
+        }
+
+        $now = now();
+
+        DB::transaction(function () use ($request, $user, $now): void {
+            DB::table('users')
+                ->where('public_id', $user->public_id)
+                ->update([
+                    'name' => $request->input('name', $user->name),
+                    'name_bn' => $request->input('nameBn', $user->name_bn),
+                    'email' => $this->normalizedEmail($request->input('email', $user->email)),
+                    'phone' => $request->input('phone', $user->phone),
+                    'division' => $request->input('division', $user->division),
+                    'district' => $request->input('district', $user->district),
+                    'upazila' => $request->input('upazila', $user->upazila),
+                    'designation' => $request->input('designation', $user->designation),
+                    'access_label' => $request->input('accessLabel', $user->access_label),
+                    'updated_at' => $now,
+                ]);
+
+            if ($user->role === 'farmer') {
+                DB::table('farmers')
+                    ->where('user_id', $user->public_id)
+                    ->update([
+                        'name_bn' => $request->input('nameBn'),
+                        'name_en' => $request->input('name', $user->name),
+                        'division' => $request->input('division', $user->division),
+                        'district' => $request->input('district', $user->district),
+                        'upazila' => $request->input('upazila', $user->upazila),
+                        'land_size' => $request->input('landAcres', 0),
+                        'crop_types' => json_encode($request->input('cropTypes', [])),
+                        'phone' => $request->input('phone', $user->phone),
+                        'bkash_account' => $request->input('bkashAccount'),
+                        'updated_at' => $now,
+                    ]);
+            }
+
+            if ($user->role === 'officer') {
+                DB::table('officers')
+                    ->where('user_id', $user->public_id)
+                    ->update([
+                        'specialty_tags' => json_encode($request->input('specialtyTags', [])),
+                        'region_districts' => json_encode($request->input('regionDistricts', [])),
+                        'updated_at' => $now,
+                    ]);
+            }
+
+            if ($user->role === 'vendor') {
+                DB::table('vendors')
+                    ->where('user_id', $user->public_id)
+                    ->update([
+                        'company_name' => $request->input('companyName', $user->name),
+                        'delivery_districts' => json_encode($request->input('deliveryDistricts', [])),
+                        'updated_at' => $now,
+                    ]);
+            }
+
+            if ($user->role === 'company') {
+                DB::table('companies')
+                    ->where('user_id', $user->public_id)
+                    ->update([
+                        'company_name' => $request->input('companyName', $user->name),
+                        'registration_no' => $request->input('registrationNo'),
+                        'crop_interests' => json_encode($request->input('cropInterests', [])),
+                        'updated_at' => $now,
+                    ]);
+            }
+        });
+
+        $updatedUser = DB::table('users')->where('public_id', $userId)->first();
+
+        return $this->ok([
+            'success' => true,
+            'user' => $this->user($updatedUser),
+        ]);
     }
 
     private function order(object $order): array
@@ -763,20 +859,26 @@ class AgroSyncController extends Controller
             return $this->fail('Farmer not found.');
         }
 
+        $priority = strtolower(trim((string) $request->input('priority'))) === 'urgent' ? 'urgent' : 'normal';
         $caseId = 'ADV-'.now()->year.'-'.str_pad((string) random_int(1, 9999999), 7, '0', STR_PAD_LEFT);
         DB::table('advisory_cases')->insert([
             'id' => $caseId,
             'tenant_id' => $farmer->tenant_id,
             'farmer_id' => $farmer->id,
+            'farmer_division' => $farmer->division,
+            'farmer_district' => $farmer->district,
+            'farmer_upazila' => $farmer->upazila,
             'crop_type' => $request->input('cropType'),
             'description' => $request->input('description'),
             'photos' => json_encode($request->input('photos', [])),
             'status' => 'pending',
+            'priority' => $priority,
             'created_at' => now(),
             'updated_at' => now(),
         ]);
 
         $this->createNotification($farmer->id, 'advisory', 'Advisory Submitted', "Your advisory case {$caseId} has been submitted.", ['push', 'email']);
+        $this->notifyOfficersForAdvisory($farmer, $caseId, $request->input('cropType'), $priority);
 
         return $this->ok(['success' => true, 'caseId' => $caseId]);
     }
@@ -793,6 +895,39 @@ class AgroSyncController extends Controller
         ]);
 
         return $this->ok(['success' => true]);
+    }
+
+    public function regionalAdvisoryStats(Request $request): JsonResponse
+    {
+        $stats = DB::table('advisory_cases')
+            ->whereNotIn('advisory_cases.id', $this->demoAdvisoryCaseIds())
+            ->join('farmers', 'advisory_cases.farmer_id', '=', 'farmers.id')
+            ->whereRaw("COALESCE(NULLIF(advisory_cases.farmer_district, ''), farmers.district) is not null")
+            ->whereRaw("COALESCE(NULLIF(advisory_cases.farmer_district, ''), farmers.district) != ''")
+            ->select(
+                DB::raw("COALESCE(NULLIF(advisory_cases.farmer_division, ''), farmers.division) as division"),
+                DB::raw("COALESCE(NULLIF(advisory_cases.farmer_district, ''), farmers.district) as district"),
+                DB::raw('COUNT(advisory_cases.id) as count'),
+                DB::raw("SUM(CASE WHEN advisory_cases.status = 'pending' THEN 1 ELSE 0 END) as pending_count"),
+                DB::raw("SUM(CASE WHEN advisory_cases.status = 'responded' THEN 1 ELSE 0 END) as responded_count"),
+                DB::raw("SUM(CASE WHEN advisory_cases.status IN ('resolved', 'closed') THEN 1 ELSE 0 END) as resolved_count")
+            )
+            ->groupBy(
+                DB::raw("COALESCE(NULLIF(advisory_cases.farmer_division, ''), farmers.division)"),
+                DB::raw("COALESCE(NULLIF(advisory_cases.farmer_district, ''), farmers.district)")
+            )
+            ->orderByDesc(DB::raw('COUNT(advisory_cases.id)'))
+            ->get()
+            ->map(fn ($row) => [
+                'division' => $row->division,
+                'district' => $row->district,
+                'total_cases' => $row->count,
+                'pending_cases' => $row->pending_count,
+                'responded_cases' => $row->responded_count,
+                'resolved_cases' => $row->resolved_count,
+            ]);
+
+        return $this->ok($stats);
     }
 
     public function products(Request $request): JsonResponse
@@ -1204,15 +1339,57 @@ class AgroSyncController extends Controller
 
     public function updateSettings(Request $request, string $userId): JsonResponse
     {
-        DB::table('user_settings')->updateOrInsert(['user_id' => $userId], [
+        $payload = [
             'email_notifications' => $request->boolean('emailNotifications'),
             'push_notifications' => $request->boolean('pushNotifications'),
             'outbreak_warnings' => $request->boolean('outbreakWarnings'),
             'urgent_advisory' => $request->boolean('urgentAdvisory'),
             'new_case_alert' => $request->boolean('newCaseAlert'),
             'updated_at' => now(),
-            'created_at' => now(),
-        ]);
+        ];
+
+        if (DB::table('user_settings')->where('user_id', $userId)->exists()) {
+            DB::table('user_settings')->where('user_id', $userId)->update($payload);
+        } else {
+            DB::table('user_settings')->insert([
+                'user_id' => $userId,
+                ...$payload,
+                'created_at' => now(),
+            ]);
+        }
+
+        return $this->ok(['success' => true]);
+    }
+
+    public function changePassword(Request $request, string $userId): JsonResponse
+    {
+        $user = DB::table('users')->where('public_id', $userId)->first();
+
+        if (! $user) {
+            return $this->fail('User not found.', 404);
+        }
+
+        $currentPassword = (string) $request->input('currentPassword');
+        $nextPassword = (string) $request->input('nextPassword');
+
+        if ($nextPassword === '') {
+            return $this->fail('New password is required.');
+        }
+
+        if (mb_strlen($nextPassword) < 6) {
+            return $this->fail('New password must be at least 6 characters long.');
+        }
+
+        if (! Hash::check($currentPassword, $user->password)) {
+            return $this->fail('Current password is incorrect.', 401);
+        }
+
+        DB::table('users')
+            ->where('public_id', $userId)
+            ->update([
+                'password' => Hash::make($nextPassword),
+                'updated_at' => now(),
+            ]);
 
         return $this->ok(['success' => true]);
     }
@@ -1308,5 +1485,83 @@ class AgroSyncController extends Controller
             'created_at' => now(),
             'updated_at' => now(),
         ]);
+    }
+
+    private function notificationSettingsForUser(string $userId): object
+    {
+        return DB::table('user_settings')->where('user_id', $userId)->first() ?: (object) [
+            'email_notifications' => true,
+            'push_notifications' => true,
+            'outbreak_warnings' => true,
+            'urgent_advisory' => true,
+            'new_case_alert' => true,
+        ];
+    }
+
+    private function notifyOfficersForAdvisory(object $farmer, string $caseId, string $cropType, string $priority): void
+    {
+        $district = trim((string) ($farmer->district ?? ''));
+
+        $officers = DB::table('officers')
+            ->join('users', 'users.public_id', '=', 'officers.user_id')
+            ->select('users.public_id as user_id', 'users.name', 'users.district as user_district', 'officers.region_districts')
+            ->where('users.role', 'officer')
+            ->where('officers.tenant_id', $farmer->tenant_id)
+            ->get();
+
+        $normalizedDistrict = strtolower($district);
+        $eligibleOfficers = $officers->filter(function (object $officer) use ($district, $normalizedDistrict) {
+            if ($district === '') {
+                return true;
+            }
+
+            $districts = collect($this->arrayValue($officer->region_districts))
+                ->map(fn ($value) => strtolower(trim((string) $value)))
+                ->filter()
+                ->values();
+
+            $officerHomeDistrict = strtolower(trim((string) ($officer->user_district ?? '')));
+
+            return $districts->contains($normalizedDistrict) || $officerHomeDistrict === $normalizedDistrict;
+        })->values();
+
+        if ($priority === 'urgent' && $eligibleOfficers->isEmpty()) {
+            $eligibleOfficers = $officers;
+        }
+
+        foreach ($eligibleOfficers as $officer) {
+            $districts = collect($this->arrayValue($officer->region_districts))
+                ->map(fn ($value) => strtolower(trim((string) $value)))
+                ->filter()
+                ->values();
+            $officerHomeDistrict = strtolower(trim((string) ($officer->user_district ?? '')));
+            $matchesDistrict = $district === ''
+                || $districts->contains($normalizedDistrict)
+                || $officerHomeDistrict === $normalizedDistrict;
+
+            if ($priority !== 'urgent' && ! $matchesDistrict) {
+                continue;
+            }
+
+            $settings = $this->notificationSettingsForUser($officer->user_id);
+            $shouldNotify = $priority === 'urgent'
+                ? (bool) $settings->urgent_advisory
+                : (bool) $settings->new_case_alert;
+
+            if (! $shouldNotify) {
+                continue;
+            }
+
+            $priorityLabel = $priority === 'urgent' ? 'Urgent' : 'Normal';
+            $location = implode(', ', array_values(array_filter([$farmer->upazila ?? null, $district, $farmer->division ?? null])));
+
+            $this->createNotification(
+                $officer->user_id,
+                'advisory',
+                $priority === 'urgent' ? 'Urgent New Case Alert' : 'New Case Alert',
+                trim("{$priorityLabel} {$cropType} advisory {$caseId} submitted from {$location}."),
+                ['push', 'email'],
+            );
+        }
     }
 }

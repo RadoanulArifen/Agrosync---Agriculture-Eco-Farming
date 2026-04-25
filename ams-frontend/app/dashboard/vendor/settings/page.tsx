@@ -1,13 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import DashboardShell from '@/components/dashboard/DashboardShell';
 import {
   Card, PageHeader, SectionHeader,
 } from '@/components/dashboard/DashboardComponents';
 import { useRoleUserContext } from '@/components/dashboard/useRoleUserContext';
 import { VENDOR_FALLBACK_USER, VENDOR_NAV_ITEMS } from '@/components/dashboard/vendorConfig';
-import { authService } from '@/services';
+import { authService, userSettingsService } from '@/services';
 
 export default function VendorSettingsPage() {
   const { user } = useRoleUserContext({ role: 'vendor', fallbackUser: VENDOR_FALLBACK_USER });
@@ -15,12 +15,18 @@ export default function VendorSettingsPage() {
   const [settings, setSettings] = useState({
     emailNotifications: true,
     pushNotifications: true,
-    orderAlerts: true,
-    stockAlerts: true,
-    paymentAlerts: true,
+    outbreakWarnings: true,
+    urgentAdvisory: true,
+    newCaseAlert: true,
   });
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    userSettingsService.getSettings(user.id).then(setSettings).catch(() => {
+      setError('Failed to load notification settings.');
+    });
+  }, [user.id]);
 
   const handlePasswordChange = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -42,13 +48,26 @@ export default function VendorSettingsPage() {
     setPasswordForm({ current: '', next: '', confirm: '' });
   };
 
+  const handleSaveSettings = async () => {
+    setMessage('');
+    setError('');
+
+    try {
+      await userSettingsService.updateSettings(user.id, settings);
+      setMessage('Notification settings saved successfully.');
+    } catch (saveError) {
+      console.error('[VendorSettings] Failed to save settings', saveError);
+      setError('Notification settings save failed.');
+    }
+  };
+
   return (
     <DashboardShell
       navItems={VENDOR_NAV_ITEMS}
       role="vendor"
       userName={user.companyName || user.name}
       userSubtitle={user.designation || 'Verified Vendor'}
-      notificationCount={Object.values(settings).filter(Boolean).length}
+      notificationCount={0}
     >
       <PageHeader title="Settings" subtitle="Change password, toggle notifications, and manage vendor preferences" />
 
@@ -75,9 +94,9 @@ export default function VendorSettingsPage() {
             {[
               ['emailNotifications', 'Email notifications'],
               ['pushNotifications', 'Push notifications'],
-              ['orderAlerts', 'New order alerts'],
-              ['stockAlerts', 'Low stock alerts'],
-              ['paymentAlerts', 'Payment alerts'],
+              ['newCaseAlert', 'New order alerts'],
+              ['urgentAdvisory', 'Low stock alerts'],
+              ['outbreakWarnings', 'Payment alerts'],
             ].map(([key, label]) => (
               <label key={key} className="flex items-center justify-between rounded-xl border border-gray-100 px-4 py-3">
                 <span className="text-sm text-gray-700">{label}</span>
@@ -89,7 +108,7 @@ export default function VendorSettingsPage() {
               </label>
             ))}
           </div>
-          <button type="button" onClick={() => setMessage('Vendor preferences saved successfully.')} className="btn-primary mt-4">
+          <button type="button" onClick={handleSaveSettings} className="btn-primary mt-4">
             Save Preferences
           </button>
         </Card>

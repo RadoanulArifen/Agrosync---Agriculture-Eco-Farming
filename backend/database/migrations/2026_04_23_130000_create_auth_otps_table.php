@@ -19,6 +19,7 @@ return new class extends Migration
             $table->timestamp('expires_at')->index();
             $table->timestamp('consumed_at')->nullable()->index();
             $table->timestamps();
+            
         });
     }
 

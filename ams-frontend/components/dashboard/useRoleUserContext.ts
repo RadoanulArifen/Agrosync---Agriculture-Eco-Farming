@@ -15,9 +15,11 @@ export function useRoleUserContext({ role, fallbackUser }: UseRoleUserContextOpt
     return currentUser?.role === role ? currentUser : fallbackUser;
   };
 
-  const [user, setUser] = useState<DashboardRoleUser>(() => resolveUser());
+  const [user, setUser] = useState<DashboardRoleUser>(() => (
+    typeof window === 'undefined' ? fallbackUser : resolveUser()
+  ));
   const [notificationCount, setNotificationCount] = useState(0);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => typeof window === 'undefined');
 
   useEffect(() => {
     const syncUser = () => {

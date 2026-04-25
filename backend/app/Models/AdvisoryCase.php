@@ -14,7 +14,7 @@ class AdvisoryCase extends Model
 
     protected $table = 'advisory_cases';
 
-    protected $fillable = ['id', 'tenant_id', 'farmer_id', 'officer_id', 'crop_type', 'description', 'photos', 'status', 'ai_diagnosis', 'ai_confidence', 'officer_response', 'internal_note', 'overridden_diagnosis', 'responded_at', 'resolved_at'];
+    protected $fillable = ['id', 'tenant_id', 'farmer_id', 'farmer_division', 'farmer_district', 'farmer_upazila', 'officer_id', 'crop_type', 'description', 'photos', 'status', 'priority', 'ai_diagnosis', 'ai_confidence', 'officer_response', 'internal_note', 'overridden_diagnosis', 'responded_at', 'resolved_at'];
 
     protected $casts = ['photos' => 'json', 'responded_at' => 'datetime', 'resolved_at' => 'datetime'];
 
