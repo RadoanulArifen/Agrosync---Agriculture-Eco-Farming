@@ -19,9 +19,34 @@ import type { Order, Product } from '@/types';
 import { formatBDT, formatDate } from '@/utils';
 
 const STOCK_ALERT_THRESHOLD = 50;
-const REALIZED_SALE_STATUSES: Order['status'][] = ['delivered'];
+const REVENUE_BOOKED_STATUSES: Order['status'][] = ['confirmed', 'dispatched'];
+const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+const normalizeVendorId = (value?: string | null) => value?.trim().toLowerCase().replace(/-/g, '_') || '';
 
 const getOrderDate = (order: Order) => order.deliveredAt || order.placedAt;
+
+const getDateKey = (date: Date) => date.toISOString().slice(0, 10);
+
+const hasRecentRevenue = (orders: Order[], endDateKey: string) => {
+  const endDate = new Date(`${endDateKey}T00:00:00Z`);
+  const startDate = new Date(endDate);
+  startDate.setUTCDate(endDate.getUTCDate() - 6);
+  const startKey = getDateKey(startDate);
+
+  return orders.some((order) => {
+    const orderKey = getOrderDate(order).slice(0, 10);
+    return orderKey >= startKey && orderKey <= endDateKey;
+  });
+};
+
+const isRevenueOrder = (order: Order) => {
+  if (order.status === 'delivered') {
+    return true;
+  }
+
+  return order.paymentStatus === 'paid' && REVENUE_BOOKED_STATUSES.includes(order.status);
+};
 
 export default function VendorDashboard() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -30,18 +55,23 @@ export default function VendorDashboard() {
     role: 'vendor',
     fallbackUser: VENDOR_FALLBACK_USER,
   });
+  const vendorId = normalizeVendorId(user.vendorId || 'vnd_001');
 
   useEffect(() => {
-    productService.getProducts(undefined, 'vnd_001').then(setProducts);
-    orderService.getOrders().then((data) => setOrders(data.filter((order) => order.vendorId === 'vnd_001')));
-  }, []);
+    productService.getProducts().then((data) => setProducts(
+      data.filter((product) => normalizeVendorId(product.vendorId) === vendorId),
+    ));
+    orderService.getOrders().then((data) => setOrders(
+      data.filter((order) => normalizeVendorId(order.vendorId) === vendorId),
+    ));
+  }, [vendorId]);
 
   const pendingOrders = useMemo(
     () => orders.filter((order) => order.status === 'pending' || order.status === 'confirmed'),
     [orders],
   );
   const realizedSales = useMemo(
-    () => orders.filter((order) => REALIZED_SALE_STATUSES.includes(order.status)),
+    () => orders.filter(isRevenueOrder),
     [orders],
   );
   const monthlyRevenue = useMemo(
@@ -55,19 +85,26 @@ export default function VendorDashboard() {
     [products],
   );
   const weeklyRevenue = useMemo(() => {
-    const dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const baseDate = new Date('2026-04-22T00:00:00');
+    const todayKey = getDateKey(new Date());
+    const latestRevenueKey = realizedSales
+      .map((order) => getOrderDate(order).slice(0, 10))
+      .sort()
+      .at(-1);
+    const endDateKey = latestRevenueKey && !hasRecentRevenue(realizedSales, todayKey)
+      ? latestRevenueKey
+      : todayKey;
+    const endDate = new Date(`${endDateKey}T00:00:00Z`);
 
     return Array.from({ length: 7 }, (_, index) => {
-      const current = new Date(baseDate);
-      current.setDate(baseDate.getDate() - (6 - index));
-      const key = current.toISOString().slice(0, 10);
+      const current = new Date(endDate);
+      current.setUTCDate(endDate.getUTCDate() - (6 - index));
+      const key = getDateKey(current);
       const revenue = realizedSales
         .filter((order) => getOrderDate(order).slice(0, 10) === key)
         .reduce((sum, order) => sum + order.totalAmount, 0);
 
       return {
-        day: dayLabels[current.getDay()],
+        day: DAY_LABELS[current.getUTCDay()],
         revenue,
       };
     });
@@ -128,7 +165,7 @@ export default function VendorDashboard() {
           value={formatBDT(monthlyRevenue)}
           icon={TrendingUp}
           iconBg="bg-green-50"
-          trend={{ value: `${realizedSales.length} completed sales`, positive: monthlyRevenue > 0 }}
+          trend={{ value: `${realizedSales.length} revenue-tracked orders`, positive: monthlyRevenue > 0 }}
         />
         <StatCard
           label="Low Stock Alert"
