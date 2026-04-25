@@ -673,10 +673,6 @@ class AgroSyncController extends Controller
         $email = $this->normalizedEmail($request->input('email'));
 
         if ($purpose === 'registration') {
-            if (! in_array($role, ['farmer', 'officer'], true)) {
-                return $this->ok(['success' => false, 'message' => 'Registration OTP is enabled for farmer and officer accounts only.']);
-            }
-
             if ($email === '' || ! str_contains($email, '@')) {
                 return $this->ok(['success' => false, 'message' => 'Enter a valid email address.']);
             }
@@ -750,7 +746,7 @@ class AgroSyncController extends Controller
         $role = $request->input('role', 'farmer');
         $verifiedRegistrationOtp = null;
 
-        if (in_array($role, ['farmer', 'officer'], true)) {
+        if (in_array($role, ['farmer', 'officer', 'admin', 'vendor', 'company'], true)) {
             $verifiedRegistrationOtp = $this->verifiedRegistrationOtp($request, $role);
 
             if (! $verifiedRegistrationOtp) {
