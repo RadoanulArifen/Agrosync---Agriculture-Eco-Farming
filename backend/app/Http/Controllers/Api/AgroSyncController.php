@@ -1115,7 +1115,7 @@ class AgroSyncController extends Controller
                 'tenant_id' => $farmer->tenant_id,
                 'farmer_id' => $farmer->id,
                 'vendor_id' => $vendorId,
-                'status' => $request->input('paymentGateway') === 'cod' ? 'pending' : 'confirmed',
+                'status' => 'pending',
                 'total_amount' => $total,
                 'payment_gateway' => $request->input('paymentGateway', 'cod'),
                 'payment_status' => $request->input('paymentGateway') === 'cod' ? 'pending' : 'paid',

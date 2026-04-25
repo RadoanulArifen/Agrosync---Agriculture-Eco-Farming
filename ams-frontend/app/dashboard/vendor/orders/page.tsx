@@ -14,6 +14,42 @@ import { formatBDT, formatDate, formatDateTime } from '@/utils';
 
 const VENDOR_ID = 'vnd_001';
 
+const getVendorPaymentLabel = (order: Order) => {
+  if (order.paymentGateway === 'cod') {
+    return 'COD / collect on delivery';
+  }
+
+  if (order.paymentStatus === 'paid') {
+    return `${order.paymentGateway.toUpperCase()} / paid`;
+  }
+
+  return `${order.paymentGateway.toUpperCase()} / ${order.paymentStatus}`;
+};
+
+const getVendorStatusNote = (order: Order) => {
+  if (order.status === 'pending') {
+    return 'New order waiting for vendor action.';
+  }
+
+  if (order.status === 'confirmed') {
+    return 'Order accepted. Shipment preparation in progress.';
+  }
+
+  if (order.status === 'dispatched') {
+    return 'Order shipped to farmer.';
+  }
+
+  if (order.status === 'delivered') {
+    return 'Order delivered successfully.';
+  }
+
+  if (order.status === 'cancelled') {
+    return 'Order rejected or cancelled.';
+  }
+
+  return '';
+};
+
 export default function VendorOrdersPage() {
   const { user } = useRoleUserContext({ role: 'vendor', fallbackUser: VENDOR_FALLBACK_USER });
   const [orders, setOrders] = useState<Order[]>([]);
@@ -108,7 +144,7 @@ export default function VendorOrdersPage() {
                     <StatusBadge status={order.status} />
                   </div>
                   <div className="mt-2 text-sm text-gray-500">
-                    Ordered on {formatDateTime(order.placedAt)} · Payment {order.paymentGateway.toUpperCase()} / {order.paymentStatus}
+                    Ordered on {formatDateTime(order.placedAt)} · Payment {getVendorPaymentLabel(order)}
                   </div>
                 </div>
 
@@ -136,7 +172,7 @@ export default function VendorOrdersPage() {
                 </div>
               </div>
 
-              <div className="mt-5 grid gap-4 lg:grid-cols-[1.4fr_1fr]">
+                <div className="mt-5 grid gap-4 lg:grid-cols-[1.4fr_1fr]">
                 <div className="rounded-2xl border border-gray-100 p-4">
                   <div className="mb-3 text-sm font-semibold text-gray-800">Order Items</div>
                   <div className="space-y-3">
@@ -153,6 +189,9 @@ export default function VendorOrdersPage() {
                 </div>
 
                 <div className="space-y-4">
+                  <div className="rounded-2xl border border-amber-100 bg-amber-50 p-4 text-sm text-amber-800">
+                    {getVendorStatusNote(order)}
+                  </div>
                   <div className="rounded-2xl border border-gray-100 p-4">
                       <div className="mb-3 text-sm font-semibold text-gray-800">Buyer Info</div>
                       <div className="space-y-2 text-sm text-gray-600">

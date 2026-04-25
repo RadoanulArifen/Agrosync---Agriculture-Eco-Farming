@@ -1787,7 +1787,7 @@ export const orderService = {
         unit: product.unit,
       })),
       totalAmount,
-      status: data.paymentGateway === 'cod' ? 'pending' : 'confirmed',
+      status: 'pending',
       paymentGateway: data.paymentGateway,
       paymentStatus: data.paymentGateway === 'cod' ? 'pending' : 'paid',
       placedAt: new Date().toISOString(),

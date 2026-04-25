@@ -16,6 +16,9 @@ import type { Order, Product } from '@/types';
 import { formatBDT } from '@/utils';
 
 const VENDOR_ID = 'vnd_001';
+const COMPLETED_SALE_STATUSES: Order['status'][] = ['delivered'];
+
+const getOrderDate = (order: Order) => order.deliveredAt || order.placedAt;
 
 export default function VendorAnalyticsPage() {
   const { user } = useRoleUserContext({ role: 'vendor', fallbackUser: VENDOR_FALLBACK_USER });
@@ -27,9 +30,36 @@ export default function VendorAnalyticsPage() {
     orderService.getOrders().then((data) => setOrders(data.filter((order) => order.vendorId === VENDOR_ID)));
   }, []);
 
-  const monthlyRevenue = useMemo(() => orders.reduce((sum, order) => sum + order.totalAmount, 0), [orders]);
-  const lastMonthBaseline = Math.max(monthlyRevenue - 5400, 1);
-  const salesGrowth = useMemo(() => (((monthlyRevenue - lastMonthBaseline) / lastMonthBaseline) * 100), [lastMonthBaseline, monthlyRevenue]);
+  const completedSales = useMemo(
+    () => orders.filter((order) => COMPLETED_SALE_STATUSES.includes(order.status)),
+    [orders],
+  );
+
+  const currentMonthSales = useMemo(
+    () => completedSales.filter((order) => getOrderDate(order).startsWith('2026-04')),
+    [completedSales],
+  );
+
+  const previousMonthSales = useMemo(
+    () => completedSales.filter((order) => getOrderDate(order).startsWith('2026-03')),
+    [completedSales],
+  );
+
+  const monthlyRevenue = useMemo(
+    () => currentMonthSales.reduce((sum, order) => sum + order.totalAmount, 0),
+    [currentMonthSales],
+  );
+  const previousMonthRevenue = useMemo(
+    () => previousMonthSales.reduce((sum, order) => sum + order.totalAmount, 0),
+    [previousMonthSales],
+  );
+  const salesGrowth = useMemo(() => {
+    if (previousMonthRevenue <= 0) {
+      return monthlyRevenue > 0 ? 100 : 0;
+    }
+
+    return ((monthlyRevenue - previousMonthRevenue) / previousMonthRevenue) * 100;
+  }, [monthlyRevenue, previousMonthRevenue]);
 
   const revenueByWeek = useMemo(() => {
     const ranges = [
@@ -41,11 +71,11 @@ export default function VendorAnalyticsPage() {
 
     return ranges.map((range) => ({
       name: range.label,
-      revenue: orders
-        .filter((order) => order.placedAt.slice(0, 10) >= range.dates[0] && order.placedAt.slice(0, 10) <= range.dates[1])
+      revenue: currentMonthSales
+        .filter((order) => getOrderDate(order).slice(0, 10) >= range.dates[0] && getOrderDate(order).slice(0, 10) <= range.dates[1])
         .reduce((sum, order) => sum + order.totalAmount, 0),
     }));
-  }, [orders]);
+  }, [currentMonthSales]);
 
   const salesTrend = useMemo(() => revenueByWeek.map((item, index) => ({
     name: item.name,
@@ -53,7 +83,7 @@ export default function VendorAnalyticsPage() {
   })), [revenueByWeek]);
 
   const topProduct = useMemo(() => {
-    const quantityByProduct = orders.reduce<Record<string, number>>((acc, order) => {
+    const quantityByProduct = currentMonthSales.reduce<Record<string, number>>((acc, order) => {
       order.items.forEach((item) => {
         acc[item.productId] = (acc[item.productId] || 0) + item.quantity;
       });
@@ -66,7 +96,7 @@ export default function VendorAnalyticsPage() {
         soldUnits: quantityByProduct[product.id] || 0,
       }))
       .sort((a, b) => b.soldUnits - a.soldUnits)[0];
-  }, [orders, products]);
+  }, [currentMonthSales, products]);
 
   return (
     <DashboardShell
@@ -82,7 +112,7 @@ export default function VendorAnalyticsPage() {
         <StatCard label="Monthly Revenue" value={formatBDT(monthlyRevenue)} icon={TrendingUp} iconBg="bg-green-50" />
         <StatCard label="Sales Growth" value={`${salesGrowth.toFixed(1)}%`} icon={BarChart3} iconBg="bg-blue-50" />
         <StatCard label="Top Product" value={topProduct?.nameEn || 'No data'} icon={FileText} iconBg="bg-amber-50" subtitle={topProduct ? `${topProduct.soldUnits} units sold` : 'Waiting for orders'} />
-        <StatCard label="Monthly Orders" value={orders.length} icon={TrendingUp} iconBg="bg-rose-50" />
+        <StatCard label="Completed Sales" value={currentMonthSales.length} icon={TrendingUp} iconBg="bg-rose-50" />
       </div>
 
       <div className="mb-6 grid gap-6 lg:grid-cols-2">
@@ -148,7 +178,7 @@ export default function VendorAnalyticsPage() {
             </div>
             <div className="rounded-2xl bg-gray-50 p-4">
               <div className="text-xs uppercase tracking-wide text-gray-400">Orders Closed</div>
-              <div className="mt-1 text-lg font-bold text-gray-900">{orders.filter((order) => order.status === 'delivered').length}</div>
+              <div className="mt-1 text-lg font-bold text-gray-900">{currentMonthSales.length}</div>
             </div>
             <div className="rounded-2xl bg-gray-50 p-4">
               <div className="text-xs uppercase tracking-wide text-gray-400">Products Listed</div>
@@ -158,7 +188,7 @@ export default function VendorAnalyticsPage() {
               <div className="font-semibold">Report Summary</div>
               <p className="mt-2 text-sm">
                 {user.companyName || user.name} is showing {salesGrowth >= 0 ? 'positive' : 'negative'} momentum with
-                {' '}{orders.length} marketplace orders tracked this month.
+                {' '}{currentMonthSales.length} completed sales tracked this month.
               </p>
             </div>
           </div>

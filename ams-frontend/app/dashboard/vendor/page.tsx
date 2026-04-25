@@ -19,6 +19,9 @@ import type { Order, Product } from '@/types';
 import { formatBDT, formatDate } from '@/utils';
 
 const STOCK_ALERT_THRESHOLD = 50;
+const REALIZED_SALE_STATUSES: Order['status'][] = ['delivered'];
+
+const getOrderDate = (order: Order) => order.deliveredAt || order.placedAt;
 
 export default function VendorDashboard() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -37,7 +40,16 @@ export default function VendorDashboard() {
     () => orders.filter((order) => order.status === 'pending' || order.status === 'confirmed'),
     [orders],
   );
-  const monthlyRevenue = useMemo(() => orders.reduce((sum, order) => sum + order.totalAmount, 0), [orders]);
+  const realizedSales = useMemo(
+    () => orders.filter((order) => REALIZED_SALE_STATUSES.includes(order.status)),
+    [orders],
+  );
+  const monthlyRevenue = useMemo(
+    () => realizedSales
+      .filter((order) => getOrderDate(order).startsWith('2026-04'))
+      .reduce((sum, order) => sum + order.totalAmount, 0),
+    [realizedSales],
+  );
   const lowStockProducts = useMemo(
     () => products.filter((product) => product.stockQty <= STOCK_ALERT_THRESHOLD),
     [products],
@@ -50,8 +62,8 @@ export default function VendorDashboard() {
       const current = new Date(baseDate);
       current.setDate(baseDate.getDate() - (6 - index));
       const key = current.toISOString().slice(0, 10);
-      const revenue = orders
-        .filter((order) => order.placedAt.slice(0, 10) === key)
+      const revenue = realizedSales
+        .filter((order) => getOrderDate(order).slice(0, 10) === key)
         .reduce((sum, order) => sum + order.totalAmount, 0);
 
       return {
@@ -59,10 +71,10 @@ export default function VendorDashboard() {
         revenue,
       };
     });
-  }, [orders]);
+  }, [realizedSales]);
 
   const topProduct = useMemo(() => {
-    const unitsByProduct = orders.reduce<Record<string, { quantity: number; productName: string }>>((acc, order) => {
+    const unitsByProduct = realizedSales.reduce<Record<string, { quantity: number; productName: string }>>((acc, order) => {
       order.items.forEach((item) => {
         const current = acc[item.productId] || { quantity: 0, productName: item.productName };
         acc[item.productId] = {
@@ -74,7 +86,7 @@ export default function VendorDashboard() {
     }, {});
 
     return Object.values(unitsByProduct).sort((a, b) => b.quantity - a.quantity)[0];
-  }, [orders]);
+  }, [realizedSales]);
 
   return (
     <DashboardShell
@@ -116,7 +128,7 @@ export default function VendorDashboard() {
           value={formatBDT(monthlyRevenue)}
           icon={TrendingUp}
           iconBg="bg-green-50"
-          trend={{ value: `${orders.length} orders`, positive: monthlyRevenue > 0 }}
+          trend={{ value: `${realizedSales.length} completed sales`, positive: monthlyRevenue > 0 }}
         />
         <StatCard
           label="Low Stock Alert"
@@ -210,7 +222,7 @@ export default function VendorDashboard() {
               <div className="text-xs uppercase tracking-wide text-green-600">Top Product</div>
               <div className="mt-2 text-lg font-bold text-green-900">{topProduct?.productName || 'No sales yet'}</div>
               <div className="mt-1 text-sm text-green-700">
-                {topProduct ? `${topProduct.quantity} units sold` : 'Place or receive orders to unlock insights'}
+                {topProduct ? `${topProduct.quantity} units sold from delivered sales` : 'Delivered sales will unlock insights here'}
               </div>
             </div>
             <div className="rounded-2xl bg-blue-50 p-4">

@@ -11,13 +11,103 @@ import { formatBDT, formatDate } from '@/utils';
 
 const TRACKING_STEPS: Order['status'][] = ['pending', 'confirmed', 'dispatched', 'delivered'];
 
+const getFarmerOrderStatusLabel = (order: Order) => {
+  if (order.status !== 'pending') {
+    return order.status;
+  }
+
+  if (order.paymentGateway === 'cod') {
+    return 'waiting vendor approval';
+  }
+
+  return 'payment received';
+};
+
+const getFarmerOrderStatusNote = (order: Order) => {
+  if (order.status === 'pending') {
+    return order.paymentGateway === 'cod'
+      ? 'Cash on delivery order placed. Vendor approval is still pending.'
+      : 'Payment received successfully. Vendor approval is still pending.';
+  }
+
+  if (order.status === 'confirmed') {
+    return 'Vendor accepted your order and is preparing the shipment.';
+  }
+
+  if (order.status === 'dispatched') {
+    return 'Vendor has shipped your parcel.';
+  }
+
+  if (order.status === 'delivered') {
+    return 'Order delivered successfully.';
+  }
+
+  if (order.status === 'cancelled') {
+    return 'This order was cancelled.';
+  }
+
+  return '';
+};
+
+const getPaymentLabel = (order: Order) => {
+  if (order.paymentGateway === 'cod') {
+    return 'Cash on delivery';
+  }
+
+  if (order.paymentStatus === 'paid') {
+    return `${order.paymentGateway.toUpperCase()} paid`;
+  }
+
+  return `${order.paymentGateway.toUpperCase()} ${order.paymentStatus}`;
+};
+
 export default function FarmerOrdersPage() {
   const { farmer, unreadNotifications, loading } = useFarmerContext();
   const [orders, setOrders] = useState<Order[]>([]);
 
   useEffect(() => {
-    if (!farmer) return;
-    orderService.getOrders(farmer.id).then(setOrders);
+    if (!farmer) return undefined;
+
+    let active = true;
+
+    const loadOrders = async () => {
+      const nextOrders = await orderService.getOrders(farmer.id);
+      if (active) {
+        setOrders(nextOrders);
+      }
+    };
+
+    void loadOrders();
+
+    const handleRefresh = () => {
+      void loadOrders();
+    };
+
+    const intervalId = window.setInterval(handleRefresh, 5000);
+    window.addEventListener('focus', handleRefresh);
+    document.addEventListener('visibilitychange', handleRefresh);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleRefresh);
+      document.removeEventListener('visibilitychange', handleRefresh);
+    };
+  }, [farmer]);
+
+  useEffect(() => {
+    const handleOrderRefresh = () => {
+      if (!farmer) return;
+      orderService.getOrders(farmer.id).then(setOrders);
+    };
+
+    window.addEventListener('storage', handleOrderRefresh);
+    window.addEventListener('ams:user-session-updated', handleOrderRefresh);
+
+    return () => {
+      window.removeEventListener('storage', handleOrderRefresh);
+      window.removeEventListener('ams:user-session-updated', handleOrderRefresh);
+    };
   }, [farmer]);
 
   if (loading || !farmer) {
@@ -48,7 +138,7 @@ export default function FarmerOrdersPage() {
                     <div className="font-semibold text-gray-800">{order.vendorName}</div>
                     <div className="text-xs text-gray-400 mt-1">{order.id} · Placed {formatDate(order.placedAt)}</div>
                   </div>
-                  <StatusBadge status={order.status} />
+                  <StatusBadge status={getFarmerOrderStatusLabel(order)} />
                 </div>
 
                 <div className="grid md:grid-cols-3 gap-3 mt-4">
@@ -58,7 +148,7 @@ export default function FarmerOrdersPage() {
                   </div>
                   <div className="rounded-xl bg-gray-50 p-3">
                     <div className="text-xs text-gray-400">Payment</div>
-                    <div className="font-semibold capitalize">{order.paymentGateway} · {order.paymentStatus}</div>
+                    <div className="font-semibold capitalize">{getPaymentLabel(order)}</div>
                   </div>
                   <div className="rounded-xl bg-gray-50 p-3">
                     <div className="text-xs text-gray-400">Estimated Delivery</div>
@@ -87,6 +177,10 @@ export default function FarmerOrdersPage() {
                     <div className="text-sm font-semibold text-gray-800">Delivery Tracking</div>
                   </div>
 
+                  <div className="mb-4 rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    {getFarmerOrderStatusNote(order)}
+                  </div>
+
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     {TRACKING_STEPS.map((step, index) => {
                       const isComplete = activeStep >= index;
@@ -94,8 +188,8 @@ export default function FarmerOrdersPage() {
                         <div key={step} className={`rounded-xl border p-3 ${isComplete ? 'border-forest/20 bg-forest/5' : 'border-gray-100 bg-gray-50'}`}>
                           <div className={`text-xs font-semibold uppercase ${isComplete ? 'text-forest' : 'text-gray-400'}`}>{step.replace('_', ' ')}</div>
                           <div className="text-xs text-gray-500 mt-1">
-                            {step === 'pending' && 'Order created'}
-                            {step === 'confirmed' && 'Payment verified'}
+                            {step === 'pending' && 'Order placed'}
+                            {step === 'confirmed' && 'Vendor accepted order'}
                             {step === 'dispatched' && 'Vendor sent parcel'}
                             {step === 'delivered' && 'Delivered to you'}
                           </div>
