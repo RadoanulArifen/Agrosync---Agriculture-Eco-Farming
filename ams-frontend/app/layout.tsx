@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+// @ts-ignore: CSS module type declarations not found
 import './globals.css';
 
 export const metadata: Metadata = {
