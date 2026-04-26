@@ -45,6 +45,6 @@ export default function AgricultureProductsPage({ searchParams }: AgriculturePro
 
 
 
-function arifen()
+
 
 
