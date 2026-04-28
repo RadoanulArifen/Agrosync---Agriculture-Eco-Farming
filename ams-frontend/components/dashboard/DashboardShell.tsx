@@ -9,6 +9,7 @@ import {
 import { cn, getInitials } from '@/utils';
 import { DASHBOARD_NOTIFICATION_ROUTES, DASHBOARD_PROFILE_ROUTES } from '@/constants';
 import { authService, notificationService } from '@/services';
+import type { ManagedUserRole } from '@/types';
 
 export interface NavItem {
   href: string;
@@ -32,6 +33,8 @@ export default function DashboardShell({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [liveNotificationCount, setLiveNotificationCount] = useState(notificationCount);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [hasActiveSession, setHasActiveSession] = useState(false);
   const pathname = usePathname();
   const profileHref = DASHBOARD_PROFILE_ROUTES[role as keyof typeof DASHBOARD_PROFILE_ROUTES] || '/';
   const notificationHref = DASHBOARD_NOTIFICATION_ROUTES[role as keyof typeof DASHBOARD_NOTIFICATION_ROUTES] || '/';
@@ -46,7 +49,7 @@ export default function DashboardShell({
   };
 
   const handleLogout = () => {
-    authService.logout();
+    authService.logout(role as ManagedUserRole);
     setUserMenuOpen(false);
     setSidebarOpen(false);
     window.location.href = loginHref;
@@ -57,7 +60,53 @@ export default function DashboardShell({
     : ['Profile', userSubtitle];
 
   useEffect(() => {
-    const currentUser = role === 'farmer' ? authService.getCurrentFarmer() : authService.getCurrentUser();
+    const resolveSession = () => {
+      const activeUser = role === 'farmer'
+        ? authService.getCurrentFarmer()
+        : authService.getCurrentUser(role as ManagedUserRole);
+      const valid = Boolean(activeUser?.id) && (role === 'farmer' || activeUser?.role === role);
+      setHasActiveSession(valid);
+      setAuthChecked(true);
+      return valid;
+    };
+
+    if (!resolveSession()) {
+      window.location.href = loginHref;
+      return;
+    }
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key && ![
+        'ams_current_role_user_id',
+        'ams_current_farmer_id',
+        'ams_current_role_user_ids_by_role',
+      ].includes(event.key)) {
+        return;
+      }
+      if (!resolveSession()) {
+        window.location.href = loginHref;
+      }
+    };
+
+    const handleUserSessionUpdated = () => {
+      if (!resolveSession()) {
+        window.location.href = loginHref;
+      }
+    };
+
+    window.addEventListener('storage', handleStorage);
+    window.addEventListener('ams:user-session-updated', handleUserSessionUpdated);
+
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('ams:user-session-updated', handleUserSessionUpdated);
+    };
+  }, [loginHref, role]);
+
+  useEffect(() => {
+    const currentUser = role === 'farmer'
+      ? authService.getCurrentFarmer()
+      : authService.getCurrentUser(role as ManagedUserRole);
 
     if (!currentUser?.id) {
       setLiveNotificationCount(notificationCount);
@@ -94,10 +143,39 @@ export default function DashboardShell({
     };
   }, [notificationCount, role]);
 
+  useEffect(() => {
+    const paymentMessageHandler = (event: MessageEvent) => {
+      try {
+        const data = event.data;
+        if (!data || typeof data !== 'object') return;
+        const type = String((data.type || '')).toLowerCase();
+        // Backend popup responses use 'sslcommerz-payment-status' payloads
+        if (type === 'sslcommerz-payment-status' || type === 'stripe-payment-status') {
+          // Notify app to refresh notifications/deals/orders
+          try { window.dispatchEvent(new Event('ams:notifications-updated')); } catch (e) {}
+          try { localStorage.setItem('ams_payment_event', JSON.stringify({ t: Date.now(), payload: data })); } catch (e) {}
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    window.addEventListener('message', paymentMessageHandler);
+    return () => window.removeEventListener('message', paymentMessageHandler);
+  }, []);
+
+  if (!authChecked || !hasActiveSession) {
+    return null;
+  }
+
   const Sidebar = (
     <div className="flex flex-col h-full bg-white border-r border-gray-100">
       {/* Logo */}
-      <div className="px-5 py-5 border-b border-gray-100 flex items-center gap-3">
+      <Link
+        href="/"
+        onClick={() => setSidebarOpen(false)}
+        className="px-5 py-5 border-b border-gray-100 flex items-center gap-3 hover:bg-gray-50 transition-colors"
+      >
         <div className="w-9 h-9 bg-forest rounded-xl flex items-center justify-center flex-shrink-0">
           <Leaf className="w-5 h-5 text-white" />
         </div>
@@ -105,7 +183,7 @@ export default function DashboardShell({
           <div className="font-bold text-forest text-base">Agricul<span className="text-harvest">MS</span></div>
           <div className="text-sm text-gray-400 capitalize">{role} Portal</div>
         </div>
-      </div>
+      </Link>
 
       {/* User card */}
       <div className="px-4 py-4 border-b border-gray-100">

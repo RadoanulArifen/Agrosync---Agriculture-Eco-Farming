@@ -4,17 +4,21 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Response as HttpResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Throwable;
 
 class AgroSyncController extends Controller
 {
     private const OTP_EXPIRY_MINUTES = 10;
+    private ?bool $cropDealPaymentColumnsAvailable = null;
+    private ?bool $orderSettlementColumnsAvailable = null;
 
     private function ok(mixed $data = null, int $status = 200): JsonResponse
     {
@@ -39,6 +43,32 @@ class AgroSyncController extends Controller
         $decoded = json_decode($value, true);
 
         return is_array($decoded) ? $decoded : [];
+    }
+
+    private function cropDealPaymentColumnsAvailable(): bool
+    {
+        if ($this->cropDealPaymentColumnsAvailable !== null) {
+            return $this->cropDealPaymentColumnsAvailable;
+        }
+
+        $this->cropDealPaymentColumnsAvailable = Schema::hasColumns('crop_deals', ['payment_gateway', 'payment_status']);
+
+        return $this->cropDealPaymentColumnsAvailable;
+    }
+
+    private function orderSettlementColumnsAvailable(): bool
+    {
+        if ($this->orderSettlementColumnsAvailable !== null) {
+            return $this->orderSettlementColumnsAvailable;
+        }
+
+        $this->orderSettlementColumnsAvailable = Schema::hasColumns('orders', [
+            'settlement_status',
+            'settlement_released_at',
+            'settlement_released_by',
+        ]);
+
+        return $this->orderSettlementColumnsAvailable;
     }
 
     private function avatarValue(Request $request): ?string
@@ -233,6 +263,7 @@ class AgroSyncController extends Controller
                 'regionDistricts' => $this->arrayValue($officer->region_districts),
                 'maxActiveCases' => (int) $officer->max_active_cases,
                 'availabilityStatus' => $officer->availability_status,
+                'active' => (bool) $officer->active,
             ];
         }
 
@@ -484,6 +515,7 @@ class AgroSyncController extends Controller
     {
         $farmer = DB::table('farmers')->where('id', $order->farmer_id)->first();
         $vendor = DB::table('vendors')->where('id', $order->vendor_id)->first();
+        $supportsSettlement = $this->orderSettlementColumnsAvailable();
         $items = DB::table('order_items')->where('order_id', $order->id)->get()->map(fn ($item) => [
             'productId' => $item->product_id,
             'productName' => $item->product_name,
@@ -506,6 +538,9 @@ class AgroSyncController extends Controller
             'placedAt' => $order->placed_at,
             'deliveredAt' => $order->delivered_at,
             'estimatedDelivery' => $order->estimated_delivery,
+            'settlementStatus' => $supportsSettlement ? ($order->settlement_status ?? 'held') : 'held',
+            'settlementReleasedAt' => $supportsSettlement ? ($order->settlement_released_at ?? null) : null,
+            'settlementReleasedBy' => $supportsSettlement ? ($order->settlement_released_by ?? null) : null,
         ];
     }
 
@@ -813,6 +848,34 @@ class AgroSyncController extends Controller
                 ]);
             }
 
+            if ($role === 'vendor') {
+                DB::table('vendors')->insert([
+                    'id' => $publicId,
+                    'user_id' => $publicId,
+                    'tenant_id' => $request->input('tenantId', 'tenant_001'),
+                    'vendor_id' => $request->input('vendorId', 'VND-'.$suffix),
+                    'company_name' => $request->input('companyName', $request->input('name', 'New Vendor')),
+                    'delivery_districts' => json_encode($request->input('deliveryDistricts', [])),
+                    'status' => 'approved',
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            }
+
+            if ($role === 'company') {
+                DB::table('companies')->insert([
+                    'id' => $publicId,
+                    'user_id' => $publicId,
+                    'tenant_id' => $request->input('tenantId', 'tenant_001'),
+                    'company_id' => $request->input('companyId', 'CMP-'.$suffix),
+                    'company_name' => $request->input('companyName', $request->input('name', 'New Company')),
+                    'registration_no' => $request->input('registrationNo', 'COMP-'.$now->year.'-'.$suffix),
+                    'crop_interests' => json_encode($request->input('cropInterests', [])),
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            }
+
             if ($verifiedRegistrationOtp) {
                 DB::table('auth_otps')->where('id', $verifiedRegistrationOtp->id)->delete();
             }
@@ -841,6 +904,47 @@ class AgroSyncController extends Controller
     {
         $cases = DB::table('advisory_cases')
             ->when($request->filled('farmerId'), fn ($query) => $query->where('farmer_id', $request->input('farmerId')))
+            ->when($request->filled('officerId'), function ($query) use ($request) {
+                $officerId = trim((string) $request->input('officerId'));
+                if ($officerId === '') {
+                    return;
+                }
+
+                $matchedOfficerIds = DB::table('officers')
+                    ->where('officer_id', $officerId)
+                    ->pluck('id')
+                    ->filter()
+                    ->values()
+                    ->all();
+
+                $query->where(function ($innerQuery) use ($officerId, $matchedOfficerIds): void {
+                    $innerQuery->where('officer_id', $officerId);
+                    if (! empty($matchedOfficerIds)) {
+                        $innerQuery->orWhereIn('officer_id', $matchedOfficerIds);
+                    }
+                });
+            })
+            ->when($request->filled('status'), fn ($query) => $query->where('status', $request->input('status')))
+            ->when($request->filled('q'), function ($query) use ($request) {
+                $search = '%'.strtolower(trim((string) $request->input('q'))).'%';
+                $farmerIds = DB::table('farmers')
+                    ->whereRaw('lower(name_en) like ?', [$search])
+                    ->pluck('id')
+                    ->filter()
+                    ->values()
+                    ->all();
+
+                $query->where(function ($innerQuery) use ($search, $farmerIds): void {
+                    $innerQuery
+                        ->whereRaw('lower(id) like ?', [$search])
+                        ->orWhereRaw('lower(crop_type) like ?', [$search])
+                        ->orWhereRaw('lower(description) like ?', [$search]);
+
+                    if (! empty($farmerIds)) {
+                        $innerQuery->orWhereIn('farmer_id', $farmerIds);
+                    }
+                });
+            })
             ->orderByDesc('created_at')
             ->get()
             ->map(fn ($case) => $this->advisoryCase($case));
@@ -872,6 +976,15 @@ class AgroSyncController extends Controller
             'created_at' => now(),
             'updated_at' => now(),
         ]);
+        DB::table('advisory_messages')->insert([
+            'case_id' => $caseId,
+            'sender_id' => $farmer->id,
+            'sender_role' => 'farmer',
+            'message' => trim((string) $request->input('description', '')),
+            'attachments' => json_encode($request->input('photos', [])),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
 
         $this->createNotification($farmer->id, 'advisory', 'Advisory Submitted', "Your advisory case {$caseId} has been submitted.", ['push', 'email']);
         $this->notifyOfficersForAdvisory($farmer, $caseId, $request->input('cropType'), $priority);
@@ -881,14 +994,45 @@ class AgroSyncController extends Controller
 
     public function respondToCase(Request $request, string $caseId): JsonResponse
     {
-        $officer = DB::table('officers')->where('id', $request->input('officerId'))->orWhere('officer_id', $request->input('officerId'))->first();
+        $case = DB::table('advisory_cases')->where('id', $caseId)->first();
+        if (! $case) {
+            return $this->fail('Advisory case not found.', 404);
+        }
+
+        $responseText = trim((string) $request->input('response'));
+        if ($responseText === '') {
+            return $this->fail('Response is required.');
+        }
+
+        $requestedOfficerId = trim((string) $request->input('officerId'));
+        $officer = DB::table('officers')
+            ->where('id', $requestedOfficerId)
+            ->orWhere('officer_id', $requestedOfficerId)
+            ->first();
+
         DB::table('advisory_cases')->where('id', $caseId)->update([
             'status' => 'responded',
-            'officer_id' => $officer?->id ?? $request->input('officerId'),
-            'officer_response' => $request->input('response'),
+            'officer_id' => $officer?->id ?? ($case->officer_id ?: $requestedOfficerId),
+            'officer_response' => $responseText,
             'responded_at' => now(),
             'updated_at' => now(),
         ]);
+        DB::table('advisory_messages')->insert([
+            'case_id' => $caseId,
+            'sender_id' => $officer?->user_id ?? $requestedOfficerId,
+            'sender_role' => 'officer',
+            'message' => $responseText,
+            'attachments' => json_encode([]),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $this->createNotification(
+            (string) $case->farmer_id,
+            'advisory',
+            'Officer Response Received',
+            "An officer has responded to your advisory case {$caseId}.",
+            ['push', 'sms'],
+        );
 
         return $this->ok(['success' => true]);
     }
@@ -938,7 +1082,7 @@ class AgroSyncController extends Controller
                 '__sortCreatedAt' => $product->created_at,
             ]);
 
-        if (! $request->filled('vendorId')) {
+        if (! $request->filled('vendorId') && $request->boolean('includeCropListings', false)) {
             $listingProducts = DB::table('crop_listings')
                 ->where('status', 'active')
                 ->when($request->filled('category'), fn ($query) => $query->where('product_category', $request->input('category')))
@@ -1027,7 +1171,8 @@ class AgroSyncController extends Controller
     public function cart(string $farmerId): JsonResponse
     {
         $cartId = 'cart_'.$farmerId;
-        DB::table('carts')->updateOrInsert(['id' => $cartId], ['farmer_id' => $farmerId, 'updated_at' => now(), 'created_at' => now()]);
+        DB::table('carts')->updateOrInsert(['id' => $cartId], 
+        ['farmer_id' => $farmerId, 'updated_at' => now(), 'created_at' => now()]);
 
         $items = DB::table('cart_items')
             ->where('cart_id', $cartId)
@@ -1080,6 +1225,7 @@ class AgroSyncController extends Controller
     {
         $orders = DB::table('orders')
             ->when($request->filled('farmerId'), fn ($query) => $query->where('farmer_id', $request->input('farmerId')))
+            ->when($request->filled('vendorId'), fn ($query) => $query->where('vendor_id', $request->input('vendorId')))
             ->orderByDesc('placed_at')
             ->get()
             ->map(fn ($order) => $this->order($order));
@@ -1108,22 +1254,33 @@ class AgroSyncController extends Controller
         $orderId = 'ORD-'.now()->year.'-'.str_pad((string) random_int(1, 99999999), 8, '0', STR_PAD_LEFT);
         $total = $products->sum(fn ($entry) => ((float) $entry['product']->price) * ((int) $entry['item']['quantity']));
         $maxDays = $products->max(fn ($entry) => (int) $entry['product']->estimated_delivery_days);
+        $paymentGateway = trim((string) $request->input('paymentGateway', 'cod'));
+        $initialPaymentStatus = $paymentGateway === 'cod'
+            ? 'pending'
+            : ($paymentGateway === 'stripe' ? 'pending' : 'paid');
 
-        DB::transaction(function () use ($request, $farmer, $products, $vendorId, $orderId, $total, $maxDays): void {
-            DB::table('orders')->insert([
+        $supportsSettlement = $this->orderSettlementColumnsAvailable();
+        DB::transaction(function () use ($farmer, $products, $vendorId, $orderId, $total, $maxDays, $supportsSettlement, $paymentGateway, $initialPaymentStatus): void {
+            $orderPayload = [
                 'id' => $orderId,
                 'tenant_id' => $farmer->tenant_id,
                 'farmer_id' => $farmer->id,
                 'vendor_id' => $vendorId,
                 'status' => 'pending',
                 'total_amount' => $total,
-                'payment_gateway' => $request->input('paymentGateway', 'cod'),
-                'payment_status' => $request->input('paymentGateway') === 'cod' ? 'pending' : 'paid',
+                'payment_gateway' => $paymentGateway,
+                'payment_status' => $initialPaymentStatus,
                 'estimated_delivery' => now()->addDays($maxDays)->toDateString(),
                 'placed_at' => now(),
                 'created_at' => now(),
                 'updated_at' => now(),
-            ]);
+            ];
+            if ($supportsSettlement) {
+                $orderPayload['settlement_status'] = 'held';
+                $orderPayload['settlement_released_at'] = null;
+                $orderPayload['settlement_released_by'] = null;
+            }
+            DB::table('orders')->insert($orderPayload);
 
             foreach ($products as $entry) {
                 DB::table('order_items')->insert([
@@ -1143,18 +1300,153 @@ class AgroSyncController extends Controller
         });
 
         $this->createNotification($farmer->id, 'order', 'Order Placed Successfully', "Order {$orderId} has been placed.", ['push', 'sms']);
+        $vendorUserId = DB::table('vendors')->where('id', $vendorId)->value('user_id');
+        if ($vendorUserId) {
+            $this->createNotification(
+                (string) $vendorUserId,
+                'order',
+                'New Order Received',
+                "New order {$orderId} has been placed and is waiting for your confirmation.",
+                ['push', 'sms'],
+            );
+        }
 
         return $this->ok(['success' => true, 'orderId' => $orderId]);
     }
 
     public function updateOrderStatus(Request $request, string $orderId): JsonResponse
     {
-        DB::table('orders')->where('id', $orderId)->update([
-            'status' => $request->input('status'),
-            'delivered_at' => $request->input('status') === 'delivered' ? now() : DB::raw('delivered_at'),
+        $order = DB::table('orders')->where('id', $orderId)->first();
+        if (! $order) {
+            return $this->fail('Order not found.', 404);
+        }
+
+        $nextStatus = (string) $request->input('status');
+        $supportsSettlement = $this->orderSettlementColumnsAvailable();
+        $nextPaymentStatus = (string) $order->payment_status;
+        if ($order->payment_gateway === 'cod' && in_array($nextStatus, ['delivered', 'completed'], true)) {
+            $nextPaymentStatus = 'paid';
+        }
+
+        $updatePayload = [
+            'status' => $nextStatus,
+            'payment_status' => $nextPaymentStatus,
+            'delivered_at' => $nextStatus === 'delivered' ? now() : DB::raw('delivered_at'),
+            'updated_at' => now(),
+        ];
+        if ($supportsSettlement) {
+            $currentSettlement = $order->settlement_status ?? 'held';
+            if ($currentSettlement !== 'released') {
+                $updatePayload['settlement_status'] = in_array($nextStatus, ['delivered', 'completed'], true) && $nextPaymentStatus === 'paid'
+                    ? 'ready_for_release'
+                    : 'held';
+            }
+        }
+
+        DB::table('orders')->where('id', $orderId)->update($updatePayload);
+        DB::table('order_status_history')->insert([
+            'order_id' => $orderId,
+            'status' => $nextStatus,
+            'created_at' => now(),
             'updated_at' => now(),
         ]);
-        DB::table('order_status_history')->insert(['order_id' => $orderId, 'status' => $request->input('status'), 'created_at' => now(), 'updated_at' => now()]);
+
+        if ($nextStatus === 'confirmed') {
+            $this->createNotification(
+                (string) $order->farmer_id,
+                'order',
+                'Order Confirmed',
+                "Vendor confirmed order {$orderId}.",
+                ['push', 'sms'],
+            );
+        }
+
+        return $this->ok(['success' => true]);
+    }
+
+    public function adminOrders(Request $request): JsonResponse
+    {
+        $orders = DB::table('orders')
+            ->when($request->filled('status'), fn ($query) => $query->where('status', $request->input('status')))
+            ->when($request->filled('paymentStatus'), fn ($query) => $query->where('payment_status', $request->input('paymentStatus')))
+            ->when($request->filled('settlementStatus') && $this->orderSettlementColumnsAvailable(), fn ($query) => $query->where('settlement_status', $request->input('settlementStatus')))
+            ->orderByDesc('placed_at')
+            ->get()
+            ->map(fn ($order) => $this->order($order));
+
+        return $this->ok($orders);
+    }
+
+    public function updateOrderSettlement(Request $request, string $orderId): JsonResponse
+    {
+        if (! $this->orderSettlementColumnsAvailable()) {
+            return $this->fail('Order settlement module is not available.', 422);
+        }
+
+        $order = DB::table('orders')->where('id', $orderId)->first();
+        if (! $order) {
+            return $this->fail('Order not found.', 404);
+        }
+
+        $action = strtolower(trim((string) $request->input('action', 'release')));
+        if (! in_array($action, ['release', 'hold'], true)) {
+            return $this->fail('Invalid settlement action.', 422);
+        }
+
+        if ($action === 'release') {
+            if (! in_array($order->status, ['delivered', 'completed'], true)) {
+                return $this->fail('Payment can be released only after delivery confirmation.');
+            }
+            if (($order->payment_status ?? 'pending') !== 'paid') {
+                return $this->fail('Order payment is not completed yet.');
+            }
+
+            DB::table('orders')->where('id', $orderId)->update([
+                'settlement_status' => 'released',
+                'settlement_released_at' => now(),
+                'settlement_released_by' => trim((string) $request->input('adminId', 'usr_adm_001')),
+                'updated_at' => now(),
+            ]);
+
+            $vendor = DB::table('vendors')->where('id', $order->vendor_id)->first();
+            if ($vendor?->user_id) {
+                $this->createNotification(
+                    $vendor->user_id,
+                    'payment',
+                    'Vendor Payout Released',
+                    "Admin released settlement for order {$orderId}.",
+                    ['push', 'sms']
+                );
+            }
+            $this->createNotification(
+                $order->farmer_id,
+                'payment',
+                'Order Settlement Completed',
+                "Payment for order {$orderId} was released to the vendor after delivery confirmation.",
+                ['push']
+            );
+            $this->createAuditLog(
+                'order',
+                'settlement_release',
+                'Super Admin',
+                "Released vendor settlement for order {$orderId}."
+            );
+
+            return $this->ok(['success' => true]);
+        }
+
+        DB::table('orders')->where('id', $orderId)->update([
+            'settlement_status' => 'held',
+            'settlement_released_at' => null,
+            'settlement_released_by' => null,
+            'updated_at' => now(),
+        ]);
+        $this->createAuditLog(
+            'order',
+            'settlement_hold',
+            'Super Admin',
+            "Kept vendor settlement on hold for order {$orderId}."
+        );
 
         return $this->ok(['success' => true]);
     }
@@ -1162,7 +1454,19 @@ class AgroSyncController extends Controller
     public function cropListings(Request $request): JsonResponse
     {
         $listings = DB::table('crop_listings')
-            ->when($request->filled('farmerId'), fn ($query) => $query->where('farmer_id', $request->input('farmerId')))
+            ->when($request->filled('farmerId'), function ($query) use ($request) {
+                $farmerId = trim((string) $request->input('farmerId'));
+                $farmer = DB::table('farmers')
+                    ->where('id', $farmerId)
+                    ->orWhere('user_id', $farmerId)
+                    ->first();
+                $candidateIds = array_filter(array_unique([
+                    $farmerId,
+                    $farmer?->id,
+                    $farmer?->user_id,
+                ]));
+                $query->whereIn('farmer_id', $candidateIds);
+            })
             ->orderByDesc('created_at')
             ->get()
             ->map(fn ($listing) => $this->cropListing($listing));
@@ -1172,12 +1476,16 @@ class AgroSyncController extends Controller
 
     public function createCropListing(Request $request): JsonResponse
     {
-        $farmer = DB::table('farmers')->where('id', $request->input('farmerId'))->first();
+        $farmerIdInput = trim((string) $request->input('farmerId'));
+        $farmer = DB::table('farmers')
+            ->where('id', $farmerIdInput)
+            ->orWhere('user_id', $farmerIdInput)
+            ->first();
         $id = 'CRP-'.str_pad((string) random_int(1, 999), 3, '0', STR_PAD_LEFT);
         DB::table('crop_listings')->insert([
             'id' => $id,
             'tenant_id' => $farmer?->tenant_id ?? 'tenant_001',
-            'farmer_id' => $request->input('farmerId'),
+            'farmer_id' => $farmer?->id ?? $farmerIdInput,
             'product_category' => $request->input('productCategory', 'Fresh Vegetables'),
             'crop_type' => $request->input('cropType'),
             'variety' => $request->input('variety'),
@@ -1196,6 +1504,57 @@ class AgroSyncController extends Controller
         return $this->ok(['success' => true, 'listingId' => $id]);
     }
 
+    public function updateCropListing(Request $request, string $listingId): JsonResponse
+    {
+        $listing = DB::table('crop_listings')->where('id', $listingId)->first();
+
+        if (! $listing) {
+            return $this->fail('Listing not found.', 404);
+        }
+
+        $payload = [];
+        $allowedColumns = [
+            'productCategory' => 'product_category',
+            'cropType' => 'crop_type',
+            'variety' => 'variety',
+            'quantityKg' => 'quantity_kg',
+            'qualityGrade' => 'quality_grade',
+            'askingPrice' => 'asking_price',
+            'harvestDate' => 'harvest_date',
+            'district' => 'district',
+            'upazila' => 'upazila',
+            'photos' => 'photos',
+            'status' => 'status',
+            'matchedCompanyId' => 'matched_company_id',
+        ];
+
+        foreach ($allowedColumns as $requestKey => $column) {
+            if (! $request->exists($requestKey)) {
+                continue;
+            }
+
+            $value = $request->input($requestKey);
+            $payload[$column] = $requestKey === 'photos' ? json_encode($value) : $value;
+        }
+
+        $payload['updated_at'] = now();
+
+        DB::table('crop_listings')->where('id', $listingId)->update($payload);
+
+        return $this->ok(['success' => true]);
+    }
+
+    public function deleteCropListing(string $listingId): JsonResponse
+    {
+        $deleted = DB::table('crop_listings')->where('id', $listingId)->delete();
+
+        if (! $deleted) {
+            return $this->fail('Listing not found.', 404);
+        }
+
+        return $this->ok(['success' => true]);
+    }
+
     public function expressInterest(Request $request): JsonResponse
     {
         $listing = DB::table('crop_listings')->where('id', $request->input('listingId'))->first();
@@ -1203,39 +1562,170 @@ class AgroSyncController extends Controller
             return $this->ok(['success' => false, 'message' => 'Listing not found.']);
         }
 
-        $existing = DB::table('crop_deals')->where('listing_id', $listing->id)->where('company_id', $request->input('companyId'))->first();
-        if ($existing) {
+        $companyIdInput = trim((string) $request->input('companyId'));
+        if ($companyIdInput === '') {
+            return $this->ok(['success' => false, 'message' => 'Company is required.']);
+        }
+
+        $company = DB::table('companies')
+            ->where('id', $companyIdInput)
+            ->orWhere('user_id', $companyIdInput)
+            ->first();
+        if (! $company) {
+            $companyUser = DB::table('users')
+                ->where('public_id', $companyIdInput)
+                ->where('role', 'company')
+                ->first();
+
+            if ($companyUser) {
+                DB::table('companies')->updateOrInsert(
+                    ['id' => $companyUser->public_id],
+                    [
+                        'user_id' => $companyUser->public_id,
+                        'tenant_id' => $companyUser->tenant_id ?? 'tenant_001',
+                        'company_id' => 'CMP-'.strtoupper(substr(md5($companyUser->public_id), 0, 6)),
+                        'company_name' => $request->input('companyName', $companyUser->name ?? 'Company'),
+                        'registration_no' => 'AUTO-'.$companyUser->public_id,
+                        'crop_interests' => json_encode([]),
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]
+                );
+            } else {
+                // Defensive fallback: ensure FK-safe company row exists even for legacy company ids.
+                DB::table('companies')->updateOrInsert(
+                    ['id' => $companyIdInput],
+                    [
+                        'user_id' => $companyIdInput,
+                        'tenant_id' => $listing->tenant_id ?? 'tenant_001',
+                        'company_id' => 'CMP-'.strtoupper(substr(md5($companyIdInput), 0, 6)),
+                        'company_name' => trim((string) $request->input('companyName', 'Company')),
+                        'registration_no' => 'AUTO-'.$companyIdInput,
+                        'crop_interests' => json_encode([]),
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]
+                );
+            }
+
+            $company = DB::table('companies')
+                ->where('id', $companyIdInput)
+                ->orWhere('user_id', $companyIdInput)
+                ->first();
+        }
+        $companyEntityId = (string) ($company?->id ?: $companyIdInput);
+        $companyUserId = (string) ($company?->user_id ?: $companyIdInput);
+
+        $allowRepeat = $request->boolean('allowRepeat', false);
+        $existing = DB::table('crop_deals')
+            ->where('listing_id', $listing->id)
+            ->whereIn('company_id', array_filter(array_unique([
+                $companyEntityId,
+                $companyUserId,
+                $companyIdInput,
+            ])))
+            ->whereIn('status', ['pending', 'confirmed', 'negotiating', 'locked', 'order_placed', 'accepted', 'delivered'])
+            ->orderByDesc('created_at')
+            ->first();
+        if ($existing && ! $allowRepeat) {
             return $this->ok(['success' => true, 'matchId' => $existing->id, 'message' => 'Interest already sent.']);
         }
 
+        $companyName = $company?->company_name ?: trim((string) $request->input('companyName', 'A company'));
         $id = 'deal_'.substr((string) time(), -6).random_int(10, 99);
-        DB::table('crop_deals')->insert([
-            'id' => $id,
-            'listing_id' => $listing->id,
-            'company_id' => $request->input('companyId'),
-            'farmer_id' => $listing->farmer_id,
-            'agreed_price' => $listing->asking_price,
-            'quantity_kg' => $listing->quantity_kg,
-            'commission_pct' => 3,
-            'commission_amt' => round(((float) $listing->asking_price) * ((int) $listing->quantity_kg) * 0.03),
-            'status' => 'pending',
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
-        DB::table('crop_listings')->where('id', $listing->id)->update(['status' => 'matched', 'matched_company_id' => $request->input('companyId'), 'updated_at' => now()]);
+        $requestedQty = min(
+            max((int) $request->input('quantityKg', (int) $listing->quantity_kg), 1),
+            (int) $listing->quantity_kg
+        );
+        $requestedPaymentGateway = $request->input('paymentGateway');
+        $supportsDealPayment = $this->cropDealPaymentColumnsAvailable();
+        DB::transaction(function () use ($id, $listing, $companyEntityId, $requestedQty, $requestedPaymentGateway, $supportsDealPayment): void {
+            $payload = [
+                'id' => $id,
+                'listing_id' => $listing->id,
+                'company_id' => $companyEntityId,
+                'farmer_id' => $listing->farmer_id,
+                'agreed_price' => $listing->asking_price,
+                'quantity_kg' => $requestedQty,
+                'commission_pct' => 3,
+                'commission_amt' => round(((float) $listing->asking_price) * $requestedQty * 0.03),
+                'status' => 'confirmed',
+                'confirmed_at' => now(),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
+            if ($supportsDealPayment) {
+                $payload['payment_gateway'] = $requestedPaymentGateway;
+                $payload['payment_status'] = 'pending';
+            }
 
-        return $this->ok(['success' => true, 'matchId' => $id]);
+            DB::table('crop_deals')->insert($payload);
+
+            DB::table('crop_listings')->where('id', $listing->id)->update([
+                'status' => 'matched',
+                'matched_company_id' => $companyEntityId,
+                'updated_at' => now(),
+            ]);
+        });
+
+        return $this->ok([
+            'success' => true,
+            'matchId' => $id,
+            'message' => $allowRepeat ? 'Repeat match request sent.' : null,
+        ]);
     }
 
     public function cropDeals(Request $request): JsonResponse
     {
+        $supportsDealPayment = $this->cropDealPaymentColumnsAvailable();
         $deals = DB::table('crop_deals')
-            ->when($request->filled('companyId'), fn ($query) => $query->where('company_id', $request->input('companyId')))
+            ->when($request->filled('companyId'), function ($query) use ($request) {
+                $companyId = trim((string) $request->input('companyId'));
+                $company = DB::table('companies')
+                    ->where('id', $companyId)
+                    ->orWhere('user_id', $companyId)
+                    ->first();
+                $candidateIds = array_filter(array_unique([
+                    $companyId,
+                    $company?->id,
+                    $company?->user_id,
+                ]));
+                $query->whereIn('company_id', $candidateIds);
+            })
+            ->when($request->filled('farmerId'), function ($query) use ($request) {
+                $farmerId = trim((string) $request->input('farmerId'));
+                $farmer = DB::table('farmers')
+                    ->where('id', $farmerId)
+                    ->orWhere('user_id', $farmerId)
+                    ->first();
+                $candidateIds = array_filter(array_unique([
+                    $farmerId,
+                    $farmer?->id,
+                    $farmer?->user_id,
+                ]));
+                $candidateListingIds = DB::table('crop_listings')
+                    ->whereIn('farmer_id', $candidateIds)
+                    ->pluck('id')
+                    ->all();
+
+                $query->where(function ($inner) use ($candidateIds, $candidateListingIds) {
+                    $inner->whereIn('farmer_id', $candidateIds);
+                    if (! empty($candidateListingIds)) {
+                        $inner->orWhereIn('listing_id', $candidateListingIds);
+                    }
+                });
+            })
             ->orderByDesc('created_at')
             ->get()
-            ->map(function ($deal) {
+            ->map(function ($deal) use ($supportsDealPayment) {
                 $company = DB::table('companies')->where('id', $deal->company_id)->first();
+                if (! $company) {
+                    $company = DB::table('companies')->where('user_id', $deal->company_id)->first();
+                }
                 $farmer = DB::table('farmers')->where('id', $deal->farmer_id)->first();
+                if (! $farmer) {
+                    $farmer = DB::table('farmers')->where('user_id', $deal->farmer_id)->first();
+                }
 
                 return [
                     'id' => $deal->id,
@@ -1250,6 +1740,8 @@ class AgroSyncController extends Controller
                     'commissionAmt' => (float) $deal->commission_amt,
                     'status' => $deal->status,
                     'confirmedAt' => $deal->confirmed_at,
+                    'paymentGateway' => $supportsDealPayment ? ($deal->payment_gateway ?? null) : null,
+                    'paymentStatus' => $supportsDealPayment ? ($deal->payment_status ?? null) : null,
                 ];
             });
 
@@ -1258,13 +1750,1206 @@ class AgroSyncController extends Controller
 
     public function updateDealStatus(Request $request, string $dealId): JsonResponse
     {
-        DB::table('crop_deals')->where('id', $dealId)->update([
-            'status' => $request->input('status'),
-            'confirmed_at' => $request->input('status') === 'confirmed' ? now() : DB::raw('confirmed_at'),
-            'updated_at' => now(),
-        ]);
+        $deal = DB::table('crop_deals')->where('id', $dealId)->first();
+        if (! $deal) {
+            return $this->fail('Deal not found.', 404);
+        }
+
+        $nextStatus = trim((string) $request->input('status'));
+        if ($nextStatus === '') {
+            return $this->fail('Status is required.');
+        }
+
+        $allowedStatuses = [
+            'pending', 'confirmed', 'negotiating', 'locked', 'order_placed',
+            'accepted', 'delivered', 'completed', 'cancelled',
+        ];
+        if (! in_array($nextStatus, $allowedStatuses, true)) {
+            return $this->fail('Invalid deal status.');
+        }
+
+        $actorRole = trim((string) $request->input('actorRole'));
+        if ($actorRole === '') {
+            $actorRole = in_array($nextStatus, ['confirmed', 'accepted', 'delivered'], true) ? 'farmer' : 'company';
+        }
+
+        $allowedTransitions = [
+            'pending' => [
+                'farmer' => ['confirmed', 'cancelled'],
+            ],
+            'confirmed' => [
+                'company' => ['negotiating', 'locked', 'cancelled', 'completed'],
+            ],
+            'negotiating' => [
+                'company' => ['negotiating', 'locked', 'cancelled'],
+                'farmer' => ['negotiating', 'locked', 'cancelled'],
+            ],
+            'locked' => [
+                'company' => ['order_placed', 'cancelled'],
+            ],
+            'order_placed' => [
+                'farmer' => ['accepted', 'cancelled'],
+            ],
+            'accepted' => [
+                'farmer' => ['delivered'],
+            ],
+            'delivered' => [
+                'company' => ['completed'],
+            ],
+        ];
+        $validNext = $allowedTransitions[$deal->status][$actorRole] ?? [];
+        if (! in_array($nextStatus, $validNext, true) && $deal->status !== $nextStatus) {
+            return $this->fail('This status change is not allowed right now.');
+        }
+
+        $supportsDealPayment = $this->cropDealPaymentColumnsAvailable();
+        $currentPaymentGateway = $supportsDealPayment ? ($deal->payment_gateway ?? null) : null;
+        $currentPaymentStatus = $supportsDealPayment ? ($deal->payment_status ?? null) : null;
+
+        $nextPrice = $request->filled('agreedPrice') ? (float) $request->input('agreedPrice') : (float) $deal->agreed_price;
+        $nextQty = $request->filled('quantityKg') ? (int) $request->input('quantityKg') : (int) $deal->quantity_kg;
+        $nextPaymentGateway = $request->filled('paymentGateway') ? (string) $request->input('paymentGateway') : $currentPaymentGateway;
+        $nextPaymentStatus = $request->filled('paymentStatus')
+            ? (string) $request->input('paymentStatus')
+            : ($nextStatus === 'completed' ? 'paid' : ($currentPaymentStatus ?: 'pending'));
+        if ($nextStatus === 'locked') {
+            // Locking starts a fresh payment attempt for this deal.
+            $nextPaymentStatus = 'pending';
+        }
+        if ($nextStatus === 'order_placed' && $supportsDealPayment) {
+            $effectiveGateway = trim((string) ($nextPaymentGateway ?: 'bkash'));
+            $effectivePaymentStatus = trim((string) ($currentPaymentStatus ?: $nextPaymentStatus ?: 'pending'));
+            if ($effectiveGateway !== 'cod' && $effectivePaymentStatus !== 'paid') {
+                return $this->fail('Please complete payment before placing order.');
+            }
+        }
+        if ($nextPrice <= 0 || $nextQty <= 0) {
+            return $this->fail('Price and quantity must be greater than zero.');
+        }
+        if ($deal->status === $nextStatus) {
+            $payload = [
+                'agreed_price' => $nextPrice,
+                'quantity_kg' => $nextQty,
+                'commission_amt' => round($nextPrice * $nextQty * (((float) $deal->commission_pct) / 100), 2),
+                'updated_at' => now(),
+            ];
+            if ($supportsDealPayment) {
+                $payload['payment_gateway'] = $nextPaymentGateway;
+                $payload['payment_status'] = $nextPaymentStatus;
+            }
+
+            DB::table('crop_deals')->where('id', $deal->id)->update($payload);
+
+            return $this->ok(['success' => true]);
+        }
+
+        DB::transaction(function () use ($deal, $nextStatus, $actorRole, $nextPrice, $nextQty, $nextPaymentGateway, $nextPaymentStatus, $supportsDealPayment): void {
+            $companyUserId = DB::table('companies')->where('id', $deal->company_id)->value('user_id')
+                ?: DB::table('companies')->where('user_id', $deal->company_id)->value('user_id');
+            $companyTargets = array_values(array_filter(array_unique([$deal->company_id, $companyUserId])));
+            $farmerUserId = DB::table('farmers')->where('id', $deal->farmer_id)->value('user_id')
+                ?: DB::table('farmers')->where('user_id', $deal->farmer_id)->value('user_id');
+            $farmerTargets = array_values(array_filter(array_unique([$deal->farmer_id, $farmerUserId])));
+            $companyName = DB::table('companies')->where('id', $deal->company_id)->value('company_name')
+                ?: DB::table('companies')->where('user_id', $deal->company_id)->value('company_name')
+                ?: 'Company';
+            $farmerName = DB::table('farmers')->where('id', $deal->farmer_id)->value('name_en')
+                ?: DB::table('farmers')->where('user_id', $deal->farmer_id)->value('name_en')
+                ?: 'Farmer';
+
+            $payload = [
+                'status' => $nextStatus,
+                'agreed_price' => $nextPrice,
+                'quantity_kg' => $nextQty,
+                'commission_amt' => round($nextPrice * $nextQty * (((float) $deal->commission_pct) / 100), 2),
+                'confirmed_at' => $nextStatus === 'confirmed' ? now() : DB::raw('confirmed_at'),
+                'updated_at' => now(),
+            ];
+            if ($supportsDealPayment) {
+                $payload['payment_gateway'] = $nextPaymentGateway;
+                $payload['payment_status'] = $nextPaymentStatus;
+            }
+
+            DB::table('crop_deals')->where('id', $deal->id)->update($payload);
+
+            if (in_array($nextStatus, ['confirmed', 'negotiating', 'locked', 'order_placed', 'accepted', 'delivered'], true)) {
+                DB::table('crop_listings')->where('id', $deal->listing_id)->update([
+                    'status' => 'matched',
+                    'matched_company_id' => $deal->company_id,
+                    'updated_at' => now(),
+                ]);
+            }
+
+            if ($nextStatus === 'completed') {
+                DB::table('crop_listings')->where('id', $deal->listing_id)->update([
+                    'status' => 'sold',
+                    'matched_company_id' => $deal->company_id,
+                    'updated_at' => now(),
+                ]);
+            }
+
+            if ($nextStatus === 'confirmed') {
+                foreach ($companyTargets as $recipientId) {
+                    $this->createNotification(
+                        $recipientId,
+                        'crop_deal',
+                        'Deal Accepted by Farmer',
+                        "{$farmerName} accepted your offer for listing {$deal->listing_id}.",
+                        ['push', 'email'],
+                    );
+                }
+                foreach ($farmerTargets as $recipientId) {
+                    $this->createNotification(
+                        $recipientId,
+                        'crop_deal',
+                        'Offer Accepted Successfully',
+                        "You accepted {$companyName}'s offer for listing {$deal->listing_id}.",
+                        ['push', 'sms'],
+                    );
+                }
+            } elseif ($nextStatus === 'negotiating') {
+                if ($actorRole === 'company') {
+                    foreach ($farmerTargets as $recipientId) {
+                        $this->createNotification(
+                            $recipientId,
+                            'crop_deal',
+                            'New Offer from Company',
+                            "{$companyName} sent an updated offer for listing {$deal->listing_id}: ৳{$nextPrice}/kg, {$nextQty} kg.",
+                            ['push', 'sms'],
+                        );
+                    }
+                } else {
+                    foreach ($companyTargets as $recipientId) {
+                        $this->createNotification(
+                            $recipientId,
+                            'crop_deal',
+                            'Final Offer from Farmer',
+                            "{$farmerName} sent a final offer for listing {$deal->listing_id}: ৳{$nextPrice}/kg, {$nextQty} kg.",
+                            ['push', 'email'],
+                        );
+                    }
+                }
+            } elseif ($nextStatus === 'locked') {
+                foreach ($farmerTargets as $recipientId) {
+                    $this->createNotification(
+                        $recipientId,
+                        'crop_deal',
+                        'Deal Locked',
+                        "{$companyName} locked deal {$deal->id}. Next step: company will place order.",
+                        ['push', 'sms'],
+                    );
+                }
+            } elseif ($nextStatus === 'order_placed') {
+                foreach ($farmerTargets as $recipientId) {
+                    $this->createNotification(
+                        $recipientId,
+                        'crop_deal',
+                        'Order Placed by Company',
+                        "{$companyName} placed order for deal {$deal->id}. Please accept or reject from My Orders.",
+                        ['push', 'sms'],
+                    );
+                }
+            } elseif ($nextStatus === 'accepted') {
+                foreach ($companyTargets as $recipientId) {
+                    $this->createNotification(
+                        $recipientId,
+                        'crop_deal',
+                        'Order Accepted by Farmer',
+                        "{$farmerName} accepted order for deal {$deal->id}.",
+                        ['push', 'email'],
+                    );
+                }
+                foreach ($farmerTargets as $recipientId) {
+                    $this->createNotification(
+                        $recipientId,
+                        'crop_deal',
+                        'Order Accepted Successfully',
+                        "You accepted {$companyName}'s order for deal {$deal->id}.",
+                        ['push', 'sms'],
+                    );
+                }
+            } elseif ($nextStatus === 'delivered') {
+                foreach ($companyTargets as $recipientId) {
+                    $this->createNotification(
+                        $recipientId,
+                        'crop_deal',
+                        'Order Marked Delivered',
+                        "{$farmerName} marked deal {$deal->id} as delivered. Please complete payment.",
+                        ['push', 'email'],
+                    );
+                }
+            } elseif ($nextStatus === 'completed') {
+                foreach ($farmerTargets as $recipientId) {
+                    $this->createNotification(
+                        $recipientId,
+                        'crop_deal',
+                        'Payment Completed',
+                        "{$companyName} completed payment for deal {$deal->id}.",
+                        ['push', 'sms'],
+                    );
+                }
+            }
+
+            if ($nextStatus === 'cancelled') {
+                $listing = DB::table('crop_listings')->where('id', $deal->listing_id)->first();
+                if ($listing && $listing->matched_company_id === $deal->company_id) {
+                    DB::table('crop_listings')->where('id', $deal->listing_id)->update([
+                        'status' => 'active',
+                        'matched_company_id' => null,
+                        'updated_at' => now(),
+                    ]);
+                }
+
+                if ($actorRole === 'farmer') {
+                    foreach ($companyTargets as $recipientId) {
+                        $this->createNotification(
+                            $recipientId,
+                            'crop_deal',
+                            'Deal Rejected by Farmer',
+                            "{$farmerName} rejected your offer for listing {$deal->listing_id}.",
+                            ['push', 'email'],
+                        );
+                    }
+                    foreach ($farmerTargets as $recipientId) {
+                        $this->createNotification(
+                            $recipientId,
+                            'crop_deal',
+                            'Deal Rejection Submitted',
+                            "You rejected {$companyName}'s offer for listing {$deal->listing_id}.",
+                            ['push', 'sms'],
+                        );
+                    }
+                } else {
+                    foreach ($farmerTargets as $recipientId) {
+                        $this->createNotification(
+                            $recipientId,
+                            'crop_deal',
+                            'Deal Cancelled by Company',
+                            "{$companyName} cancelled deal {$deal->id}.",
+                            ['push', 'sms'],
+                        );
+                    }
+                }
+            }
+        });
 
         return $this->ok(['success' => true]);
+    }
+
+    public function initiateSslCommerzPayment(Request $request): JsonResponse
+    {
+        $dealId = trim((string) $request->input('dealId'));
+        $companyId = trim((string) $request->input('companyId'));
+        $listingId = trim((string) $request->input('listingId'));
+
+        if ($companyId === '' || ($dealId === '' && $listingId === '')) {
+            return $this->fail('Company ID and either deal ID or listing ID are required.');
+        }
+
+        $company = DB::table('companies')
+            ->where('id', $companyId)
+            ->orWhere('user_id', $companyId)
+            ->first();
+        $candidateCompanyIds = array_values(array_filter(array_unique([
+            $companyId,
+            (string) ($company?->id ?? ''),
+            (string) ($company?->user_id ?? ''),
+        ])));
+        if (count($candidateCompanyIds) === 0) {
+            $candidateCompanyIds = [$companyId];
+        }
+
+        $deal = null;
+        if ($dealId !== '') {
+            $deal = DB::table('crop_deals')
+                ->where('id', $dealId)
+                ->whereIn('company_id', $candidateCompanyIds)
+                ->first();
+            if (! $deal) {
+                // Fallback for legacy rows where company_id format differs.
+                $deal = DB::table('crop_deals')
+                    ->where('id', $dealId)
+                    ->first();
+            }
+        }
+
+        // Legacy fallback when only listingId is available from old clients.
+        if (! $deal && $dealId === '' && $listingId !== '') {
+            $deal = DB::table('crop_deals')
+                ->where('listing_id', $listingId)
+                ->whereIn('company_id', $candidateCompanyIds)
+                ->orderByDesc('created_at')
+                ->first();
+        }
+
+        if (! $deal) {
+            return $this->fail('Deal not found.', 404);
+        }
+
+        $dealId = (string) $deal->id;
+
+        if ((string) $deal->status !== 'locked') {
+            return $this->fail('Please lock the deal before starting sandbox payment.');
+        }
+
+        if (($deal->payment_status ?? 'pending') === 'paid') {
+            return $this->ok([
+                'success' => true,
+                'alreadyPaid' => true,
+                'message' => 'Payment already completed for this deal. You can place order now.',
+            ]);
+        }
+
+        $amount = max(1, round(((float) $deal->agreed_price) * ((int) $deal->quantity_kg), 2));
+        $frontendBaseUrl = rtrim((string) env('FRONTEND_URL', env('APP_URL', 'http://localhost:3000')), '/');
+        $callbackBase = rtrim((string) env('APP_URL', 'http://localhost:8000'), '/').'/api/v1/payments/sslcommerz';
+        $storeId = (string) env('SSLCOMMERZ_STORE_ID', 'agris69eef34ef232f');
+        $storePassword = (string) env('SSLCOMMERZ_STORE_PASSWORD', 'agris69eef34ef232f@ssl');
+        $tranId = 'DEAL_'.Str::upper(Str::random(20));
+
+        $companyName = trim((string) ($company?->company_name ?: 'Company'));
+
+        $customerEmail = trim((string) $request->input('customerEmail', 'test@test.com'));
+        $customerPhone = trim((string) $request->input('customerPhone', '01711111111'));
+        $customerAddress = trim((string) $request->input('customerAddress', 'Dhaka'));
+        $customerCity = trim((string) $request->input('customerCity', 'Dhaka'));
+        $customerState = trim((string) $request->input('customerState', 'Dhaka'));
+        $customerPostcode = trim((string) $request->input('customerPostcode', '1000'));
+
+        $requestedGateway = trim((string) $request->input('paymentGateway', $deal->payment_gateway ?: 'bkash'));
+
+        $postData = [
+            'store_id' => $storeId,
+            'store_passwd' => $storePassword,
+            'total_amount' => (string) $amount,
+            'currency' => 'BDT',
+            'tran_id' => $tranId,
+            'success_url' => $callbackBase.'/success',
+            'fail_url' => $callbackBase.'/fail',
+            'cancel_url' => $callbackBase.'/cancel',
+            'emi_option' => '1',
+            'emi_max_inst_option' => '9',
+            'emi_selected_inst' => '9',
+            'cus_name' => $companyName,
+            'cus_email' => $customerEmail !== '' ? $customerEmail : 'test@test.com',
+            'cus_add1' => $customerAddress !== '' ? $customerAddress : 'Dhaka',
+            'cus_add2' => $customerAddress !== '' ? $customerAddress : 'Dhaka',
+            'cus_city' => $customerCity !== '' ? $customerCity : 'Dhaka',
+            'cus_state' => $customerState !== '' ? $customerState : 'Dhaka',
+            'cus_postcode' => $customerPostcode !== '' ? $customerPostcode : '1000',
+            'cus_country' => 'Bangladesh',
+            'cus_phone' => $customerPhone !== '' ? $customerPhone : '01711111111',
+            'cus_fax' => $customerPhone !== '' ? $customerPhone : '01711111111',
+            'ship_name' => $companyName,
+            'ship_add1' => 'Dhaka',
+            'ship_add2' => 'Dhaka',
+            'ship_city' => 'Dhaka',
+            'ship_state' => 'Dhaka',
+            'ship_postcode' => '1000',
+            'ship_country' => 'Bangladesh',
+            'value_a' => $dealId,
+            'value_b' => (string) $deal->company_id,
+            'value_c' => (string) $deal->listing_id,
+            'value_d' => $frontendBaseUrl.'/dashboard/company/matches',
+            'cart' => json_encode([
+                ['product' => 'Deal '.$deal->listing_id, 'amount' => (string) $amount],
+            ]),
+            'product_amount' => (string) $amount,
+            'vat' => '0',
+            'discount_amount' => '0',
+            'convenience_fee' => '0',
+        ];
+
+        $gatewayPageUrl = '';
+        try {
+            $response = Http::asForm()
+                ->timeout(30)
+                ->connectTimeout(30)
+                ->withoutVerifying()
+                ->post('https://sandbox.sslcommerz.com/gwprocess/v3/api.php', $postData);
+            if ($response->successful()) {
+                $sslcz = $response->json();
+                $gatewayPageUrl = trim((string) ($sslcz['GatewayPageURL'] ?? ''));
+            }
+        } catch (Throwable $exception) {
+            $gatewayPageUrl = '';
+        }
+
+        if ($gatewayPageUrl === '') {
+            $gatewayPageUrl = $this->sslCommerzMockGatewayUrl($dealId, $tranId, (string) $amount);
+        }
+
+        if ($this->cropDealPaymentColumnsAvailable()) {
+            DB::table('crop_deals')
+                ->where('id', $dealId)
+                ->update([
+                    'payment_gateway' => $requestedGateway !== '' ? $requestedGateway : 'bkash',
+                    'payment_status' => 'pending',
+                    'updated_at' => now(),
+                ]);
+        }
+
+        return $this->ok([
+            'success' => true,
+            'gatewayPageUrl' => $gatewayPageUrl,
+            'tranId' => $tranId,
+            'dealId' => $dealId,
+        ]);
+    }
+
+    public function initiateStripePayment(Request $request): JsonResponse
+    {
+        $dealId = trim((string) $request->input('dealId'));
+        $companyId = trim((string) $request->input('companyId'));
+        $listingId = trim((string) $request->input('listingId'));
+
+        if ($companyId === '' || ($dealId === '' && $listingId === '')) {
+            return $this->fail('Company ID and either deal ID or listing ID are required.');
+        }
+
+        $company = DB::table('companies')
+            ->where('id', $companyId)
+            ->orWhere('user_id', $companyId)
+            ->first();
+        $candidateCompanyIds = array_values(array_filter(array_unique([
+            $companyId,
+            (string) ($company?->id ?? ''),
+            (string) ($company?->user_id ?? ''),
+        ])));
+        if (count($candidateCompanyIds) === 0) {
+            $candidateCompanyIds = [$companyId];
+        }
+
+        $deal = null;
+        if ($dealId !== '') {
+            $deal = DB::table('crop_deals')
+                ->where('id', $dealId)
+                ->whereIn('company_id', $candidateCompanyIds)
+                ->first();
+            if (! $deal) {
+                $deal = DB::table('crop_deals')
+                    ->where('id', $dealId)
+                    ->first();
+            }
+        }
+
+        if (! $deal && $dealId === '' && $listingId !== '') {
+            $deal = DB::table('crop_deals')
+                ->where('listing_id', $listingId)
+                ->whereIn('company_id', $candidateCompanyIds)
+                ->orderByDesc('created_at')
+                ->first();
+        }
+
+        if (! $deal) {
+            return $this->fail('Deal not found.', 404);
+        }
+
+        $dealId = (string) $deal->id;
+
+        if ((string) $deal->status !== 'locked') {
+            return $this->fail('Please lock the deal before starting payment.');
+        }
+
+        if (($deal->payment_status ?? 'pending') === 'paid') {
+            return $this->ok([
+                'success' => true,
+                'alreadyPaid' => true,
+                'message' => 'Payment already completed for this deal. You can place order now.',
+            ]);
+        }
+
+        $amount = max(1, round(((float) $deal->agreed_price) * ((int) $deal->quantity_kg), 2));
+        $amountMinor = (int) max(100, round($amount * 100));
+        $currency = strtolower(trim((string) env('STRIPE_CURRENCY', 'usd')));
+        $backendBase = rtrim((string) env('APP_URL', 'http://localhost:8000'), '/');
+        $successUrl = $backendBase.'/api/v1/payments/stripe/success?'.http_build_query([
+            'deal_id' => $dealId,
+            'company_id' => $companyId,
+            'listing_id' => (string) $deal->listing_id,
+            'session_id' => '{CHECKOUT_SESSION_ID}',
+        ]);
+        $cancelUrl = $backendBase.'/api/v1/payments/stripe/cancel?'.http_build_query([
+            'deal_id' => $dealId,
+            'company_id' => $companyId,
+            'listing_id' => (string) $deal->listing_id,
+        ]);
+        $stripeSecretKey = trim((string) env('STRIPE_SECRET_KEY', ''));
+        $gatewayPageUrl = '';
+        $sessionId = '';
+
+        if ($stripeSecretKey !== '') {
+            try {
+                $stripeResponse = Http::asForm()
+                    ->timeout(30)
+                    ->connectTimeout(30)
+                    ->withToken($stripeSecretKey)
+                    ->post('https://api.stripe.com/v1/checkout/sessions', [
+                        'mode' => 'payment',
+                        'success_url' => $successUrl,
+                        'cancel_url' => $cancelUrl,
+                        'client_reference_id' => $dealId,
+                        'metadata[deal_id]' => $dealId,
+                        'metadata[company_id]' => $companyId,
+                        'metadata[listing_id]' => (string) $deal->listing_id,
+                        'line_items[0][quantity]' => 1,
+                        'line_items[0][price_data][currency]' => $currency,
+                        'line_items[0][price_data][unit_amount]' => $amountMinor,
+                        'line_items[0][price_data][product_data][name]' => 'Crop Deal '.$deal->listing_id,
+                        'line_items[0][price_data][product_data][description]' => 'Payment for deal '.$dealId,
+                    ]);
+
+                if ($stripeResponse->successful()) {
+                    $payload = $stripeResponse->json();
+                    $gatewayPageUrl = trim((string) ($payload['url'] ?? ''));
+                    $sessionId = trim((string) ($payload['id'] ?? ''));
+                }
+            } catch (Throwable $exception) {
+                $gatewayPageUrl = '';
+                $sessionId = '';
+            }
+        }
+
+        if ($gatewayPageUrl === '') {
+            $gatewayPageUrl = $this->stripeMockGatewayUrl($dealId, $amountMinor, $currency);
+        }
+
+        if ($this->cropDealPaymentColumnsAvailable()) {
+            DB::table('crop_deals')
+                ->where('id', $dealId)
+                ->update([
+                    'payment_gateway' => 'stripe',
+                    'payment_status' => 'pending',
+                    'updated_at' => now(),
+                ]);
+        }
+
+        return $this->ok([
+            'success' => true,
+            'gatewayPageUrl' => $gatewayPageUrl,
+            'sessionId' => $sessionId !== '' ? $sessionId : null,
+            'dealId' => $dealId,
+        ]);
+    }
+
+    public function stripeSuccess(Request $request): HttpResponse
+    {
+        $dealId = trim((string) ($request->input('deal_id') ?: $request->input('value_a')));
+        $sessionId = trim((string) $request->input('session_id'));
+        $verified = false;
+        $stripeSecretKey = trim((string) env('STRIPE_SECRET_KEY', ''));
+
+        if ($sessionId !== '' && $stripeSecretKey !== '') {
+            try {
+                $sessionResponse = Http::withToken($stripeSecretKey)
+                    ->timeout(30)
+                    ->connectTimeout(30)
+                    ->get("https://api.stripe.com/v1/checkout/sessions/{$sessionId}");
+                if ($sessionResponse->successful()) {
+                    $session = $sessionResponse->json();
+                    $paymentStatus = strtolower((string) ($session['payment_status'] ?? ''));
+                    $status = strtolower((string) ($session['status'] ?? ''));
+                    $verified = $paymentStatus === 'paid' || $status === 'complete';
+                }
+            } catch (Throwable $exception) {
+                $verified = false;
+            }
+        }
+
+        // For local mock flow, allow explicit success without Stripe verification.
+        if (! $verified && $sessionId === '') {
+            $verified = true;
+        }
+
+        if ($dealId !== '' && $verified && $this->cropDealPaymentColumnsAvailable()) {
+            $deal = DB::table('crop_deals')->where('id', $dealId)->first();
+            DB::table('crop_deals')->where('id', $dealId)->update([
+                'payment_status' => 'paid',
+                'payment_gateway' => 'stripe',
+                'updated_at' => now(),
+            ]);
+
+            if ($deal) {
+                $companyUserId = DB::table('companies')->where('id', $deal->company_id)->value('user_id')
+                    ?: DB::table('companies')->where('user_id', $deal->company_id)->value('user_id');
+                $companyTargets = array_values(array_filter(array_unique([$deal->company_id, $companyUserId])));
+                foreach ($companyTargets as $recipientId) {
+                    $this->createNotification(
+                        $recipientId,
+                        'payment',
+                        'Payment Confirmed',
+                        "Stripe payment completed for deal {$dealId}. You can place order now.",
+                        ['push', 'email'],
+                    );
+                }
+            }
+        }
+
+        return $this->sslPaymentPopupResponse(
+            'success',
+            $dealId,
+            $sessionId,
+            'Payment successful. You can return to the Company Dashboard.',
+        );
+    }
+
+    public function stripeFail(Request $request): HttpResponse
+    {
+        $dealId = trim((string) ($request->input('deal_id') ?: $request->input('value_a')));
+        $sessionId = trim((string) $request->input('session_id'));
+
+        if ($dealId !== '' && $this->cropDealPaymentColumnsAvailable()) {
+            DB::table('crop_deals')->where('id', $dealId)->update([
+                'payment_status' => 'failed',
+                'payment_gateway' => 'stripe',
+                'updated_at' => now(),
+            ]);
+        }
+
+        return $this->sslPaymentPopupResponse(
+            'failed',
+            $dealId,
+            $sessionId,
+            'Payment failed. Please try Pay Now again.',
+        );
+    }
+
+    public function stripeCancel(Request $request): HttpResponse
+    {
+        $dealId = trim((string) ($request->input('deal_id') ?: $request->input('value_a')));
+        $sessionId = trim((string) $request->input('session_id'));
+
+        if ($dealId !== '' && $this->cropDealPaymentColumnsAvailable()) {
+            DB::table('crop_deals')->where('id', $dealId)->update([
+                'payment_status' => 'pending',
+                'payment_gateway' => 'stripe',
+                'updated_at' => now(),
+            ]);
+        }
+
+        return $this->sslPaymentPopupResponse(
+            'cancelled',
+            $dealId,
+            $sessionId,
+            'Payment was cancelled.',
+        );
+    }
+
+    public function stripeMockGateway(Request $request): HttpResponse
+    {
+        $dealId = trim((string) $request->query('deal_id'));
+        $amount = trim((string) $request->query('amount', '0'));
+        $currency = trim((string) $request->query('currency', 'usd'));
+        $base = rtrim((string) env('APP_URL', 'http://localhost:8000'), '/').'/api/v1/payments/stripe';
+        $successUrl = $base.'/success?'.http_build_query([
+            'deal_id' => $dealId,
+            'status' => 'SUCCESS',
+        ]);
+        $failUrl = $base.'/fail?'.http_build_query([
+            'deal_id' => $dealId,
+            'status' => 'FAILED',
+        ]);
+        $cancelUrl = $base.'/cancel?'.http_build_query([
+            'deal_id' => $dealId,
+            'status' => 'CANCELLED',
+        ]);
+
+        $dealSafe = htmlspecialchars($dealId, ENT_QUOTES, 'UTF-8');
+        $amountSafe = htmlspecialchars($amount, ENT_QUOTES, 'UTF-8');
+        $currencySafe = htmlspecialchars(strtoupper($currency), ENT_QUOTES, 'UTF-8');
+        $successSafe = htmlspecialchars($successUrl, ENT_QUOTES, 'UTF-8');
+        $failSafe = htmlspecialchars($failUrl, ENT_QUOTES, 'UTF-8');
+        $cancelSafe = htmlspecialchars($cancelUrl, ENT_QUOTES, 'UTF-8');
+
+        $html = <<<HTML
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Stripe Checkout Mock</title></head>
+<body style="font-family: sans-serif; max-width: 640px; margin: 48px auto; padding: 24px;">
+  <h2>Stripe Checkout (Local Mock)</h2>
+  <p>Deal ID: <strong>{$dealSafe}</strong></p>
+  <p>Amount: <strong>{$currencySafe} {$amountSafe}</strong></p>
+  <p>Stripe sandbox could not be reached from local/dev. Use a test action below.</p>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;">
+    <a href="{$successSafe}" style="padding:10px 16px;background:#16a34a;color:#fff;border-radius:8px;text-decoration:none;">Simulate Success</a>
+    <a href="{$failSafe}" style="padding:10px 16px;background:#dc2626;color:#fff;border-radius:8px;text-decoration:none;">Simulate Fail</a>
+    <a href="{$cancelSafe}" style="padding:10px 16px;background:#6b7280;color:#fff;border-radius:8px;text-decoration:none;">Simulate Cancel</a>
+  </div>
+</body>
+</html>
+HTML;
+
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
+
+    public function initiateOrderStripePayment(Request $request): JsonResponse
+    {
+        $orderId = trim((string) $request->input('orderId'));
+        $farmerId = trim((string) $request->input('farmerId'));
+
+        if ($orderId === '') {
+            return $this->fail('Order ID is required.');
+        }
+
+        $order = DB::table('orders')->where('id', $orderId)->first();
+        if (! $order) {
+            return $this->fail('Order not found.', 404);
+        }
+        if ($farmerId !== '' && (string) $order->farmer_id !== $farmerId) {
+            return $this->fail('Order does not belong to this farmer.', 403);
+        }
+
+        if (($order->payment_status ?? 'pending') === 'paid') {
+            return $this->ok([
+                'success' => true,
+                'alreadyPaid' => true,
+                'message' => 'Payment already completed for this order.',
+            ]);
+        }
+
+        $amount = max(1, round((float) $order->total_amount, 2));
+        $amountMinor = (int) max(100, round($amount * 100));
+        $currency = strtolower(trim((string) env('STRIPE_CURRENCY', 'usd')));
+        $backendBase = rtrim((string) env('APP_URL', 'http://localhost:8000'), '/');
+        $successUrl = $backendBase.'/api/v1/payments/orders/stripe/success?'.http_build_query([
+            'order_id' => $orderId,
+            'farmer_id' => (string) $order->farmer_id,
+            'session_id' => '{CHECKOUT_SESSION_ID}',
+        ]);
+        $cancelUrl = $backendBase.'/api/v1/payments/orders/stripe/cancel?'.http_build_query([
+            'order_id' => $orderId,
+            'farmer_id' => (string) $order->farmer_id,
+        ]);
+
+        $stripeSecretKey = trim((string) env('STRIPE_SECRET_KEY', ''));
+        $gatewayPageUrl = '';
+        $sessionId = '';
+
+        if ($stripeSecretKey !== '') {
+            try {
+                $stripeResponse = Http::asForm()
+                    ->timeout(30)
+                    ->connectTimeout(30)
+                    ->withToken($stripeSecretKey)
+                    ->post('https://api.stripe.com/v1/checkout/sessions', [
+                        'mode' => 'payment',
+                        'success_url' => $successUrl,
+                        'cancel_url' => $cancelUrl,
+                        'client_reference_id' => $orderId,
+                        'metadata[order_id]' => $orderId,
+                        'metadata[farmer_id]' => (string) $order->farmer_id,
+                        'line_items[0][quantity]' => 1,
+                        'line_items[0][price_data][currency]' => $currency,
+                        'line_items[0][price_data][unit_amount]' => $amountMinor,
+                        'line_items[0][price_data][product_data][name]' => 'Order '.$orderId,
+                        'line_items[0][price_data][product_data][description]' => 'Marketplace payment for order '.$orderId,
+                    ]);
+
+                if ($stripeResponse->successful()) {
+                    $payload = $stripeResponse->json();
+                    $gatewayPageUrl = trim((string) ($payload['url'] ?? ''));
+                    $sessionId = trim((string) ($payload['id'] ?? ''));
+                }
+            } catch (Throwable) {
+                $gatewayPageUrl = '';
+                $sessionId = '';
+            }
+        }
+
+        if ($gatewayPageUrl === '') {
+            $gatewayPageUrl = $this->orderStripeMockGatewayUrl($orderId, $amountMinor, $currency, (string) $order->farmer_id);
+        }
+
+        DB::table('orders')
+            ->where('id', $orderId)
+            ->update([
+                'payment_gateway' => 'stripe',
+                'payment_status' => 'pending',
+                'txn_ref' => $sessionId !== '' ? $sessionId : $order->txn_ref,
+                'updated_at' => now(),
+            ]);
+
+        return $this->ok([
+            'success' => true,
+            'gatewayPageUrl' => $gatewayPageUrl,
+            'sessionId' => $sessionId !== '' ? $sessionId : null,
+            'orderId' => $orderId,
+        ]);
+    }
+
+    public function orderStripeSuccess(Request $request): HttpResponse
+    {
+        $orderId = trim((string) $request->input('order_id'));
+        $sessionId = trim((string) $request->input('session_id'));
+        $verified = false;
+        $stripeSecretKey = trim((string) env('STRIPE_SECRET_KEY', ''));
+
+        if ($sessionId !== '' && $stripeSecretKey !== '') {
+            try {
+                $sessionResponse = Http::withToken($stripeSecretKey)
+                    ->timeout(30)
+                    ->connectTimeout(30)
+                    ->get("https://api.stripe.com/v1/checkout/sessions/{$sessionId}");
+                if ($sessionResponse->successful()) {
+                    $session = $sessionResponse->json();
+                    $paymentStatus = strtolower((string) ($session['payment_status'] ?? ''));
+                    $status = strtolower((string) ($session['status'] ?? ''));
+                    $verified = $paymentStatus === 'paid' || $status === 'complete';
+                    if ($orderId === '') {
+                        $orderId = trim((string) ($session['metadata']['order_id'] ?? $session['client_reference_id'] ?? ''));
+                    }
+                }
+            } catch (Throwable) {
+                $verified = false;
+            }
+        }
+
+        if (! $verified && $sessionId === '') {
+            $verified = true;
+        }
+
+        if ($orderId !== '' && $verified) {
+            $order = DB::table('orders')->where('id', $orderId)->first();
+            if (! $order) {
+                return $this->sslPaymentPopupResponse(
+                    'failed',
+                    $orderId,
+                    $sessionId,
+                    'Payment could not be matched with an order. Please contact support.',
+                );
+            }
+
+            $supportsSettlement = $this->orderSettlementColumnsAvailable();
+            $shouldBeReadyForRelease = in_array((string) $order->status, ['delivered', 'completed'], true);
+            $orderUpdatePayload = [
+                'payment_status' => 'paid',
+                'payment_gateway' => 'stripe',
+                'txn_ref' => $sessionId !== '' ? $sessionId : DB::raw('txn_ref'),
+                'updated_at' => now(),
+            ];
+            if ($supportsSettlement && (($order->settlement_status ?? 'held') !== 'released')) {
+                $orderUpdatePayload['settlement_status'] = $shouldBeReadyForRelease ? 'ready_for_release' : 'held';
+            }
+
+            DB::table('orders')->where('id', $orderId)->update($orderUpdatePayload);
+
+            $this->createNotification(
+                (string) $order->farmer_id,
+                'payment',
+                'Order Payment Confirmed',
+                "Stripe sandbox payment completed for order {$orderId}.",
+                ['push', 'sms'],
+            );
+            $vendorUserId = DB::table('vendors')->where('id', $order->vendor_id)->value('user_id');
+            if ($vendorUserId) {
+                $this->createNotification(
+                    (string) $vendorUserId,
+                    'payment',
+                    'Customer Payment Received',
+                    "Order {$orderId} payment is confirmed via Stripe sandbox.",
+                    ['push', 'sms'],
+                );
+            }
+        }
+
+        return $this->sslPaymentPopupResponse(
+            'success',
+            $orderId,
+            $sessionId,
+            'Payment successful. You can return to the Farmer Dashboard.',
+        );
+    }
+
+    public function orderStripeFail(Request $request): HttpResponse
+    {
+        $orderId = trim((string) $request->input('order_id'));
+        $sessionId = trim((string) $request->input('session_id'));
+
+        if ($orderId !== '') {
+            DB::table('orders')->where('id', $orderId)->update([
+                'payment_status' => 'failed',
+                'payment_gateway' => 'stripe',
+                'updated_at' => now(),
+            ]);
+        }
+
+        return $this->sslPaymentPopupResponse(
+            'failed',
+            $orderId,
+            $sessionId,
+            'Payment failed. Please try Stripe payment again.',
+        );
+    }
+
+    public function orderStripeCancel(Request $request): HttpResponse
+    {
+        $orderId = trim((string) $request->input('order_id'));
+        $sessionId = trim((string) $request->input('session_id'));
+
+        if ($orderId !== '') {
+            DB::table('orders')->where('id', $orderId)->update([
+                'payment_status' => 'pending',
+                'payment_gateway' => 'stripe',
+                'updated_at' => now(),
+            ]);
+        }
+
+        return $this->sslPaymentPopupResponse(
+            'cancelled',
+            $orderId,
+            $sessionId,
+            'Payment was cancelled.',
+        );
+    }
+
+    public function orderStripeMockGateway(Request $request): HttpResponse
+    {
+        $orderId = trim((string) $request->query('order_id'));
+        $farmerId = trim((string) $request->query('farmer_id'));
+        $amount = trim((string) $request->query('amount', '0'));
+        $currency = trim((string) $request->query('currency', 'usd'));
+        $base = rtrim((string) env('APP_URL', 'http://localhost:8000'), '/').'/api/v1/payments/orders/stripe';
+        $successUrl = $base.'/success?'.http_build_query([
+            'order_id' => $orderId,
+            'farmer_id' => $farmerId,
+            'status' => 'SUCCESS',
+        ]);
+        $failUrl = $base.'/fail?'.http_build_query([
+            'order_id' => $orderId,
+            'farmer_id' => $farmerId,
+            'status' => 'FAILED',
+        ]);
+        $cancelUrl = $base.'/cancel?'.http_build_query([
+            'order_id' => $orderId,
+            'farmer_id' => $farmerId,
+            'status' => 'CANCELLED',
+        ]);
+
+        $orderSafe = htmlspecialchars($orderId, ENT_QUOTES, 'UTF-8');
+        $amountSafe = htmlspecialchars($amount, ENT_QUOTES, 'UTF-8');
+        $currencySafe = htmlspecialchars(strtoupper($currency), ENT_QUOTES, 'UTF-8');
+        $successSafe = htmlspecialchars($successUrl, ENT_QUOTES, 'UTF-8');
+        $failSafe = htmlspecialchars($failUrl, ENT_QUOTES, 'UTF-8');
+        $cancelSafe = htmlspecialchars($cancelUrl, ENT_QUOTES, 'UTF-8');
+
+        $html = <<<HTML
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Stripe Checkout Mock (Order)</title></head>
+<body style="font-family: sans-serif; max-width: 640px; margin: 48px auto; padding: 24px;">
+  <h2>Stripe Checkout (Order Mock)</h2>
+  <p>Order ID: <strong>{$orderSafe}</strong></p>
+  <p>Amount: <strong>{$currencySafe} {$amountSafe}</strong></p>
+  <p>Stripe sandbox could not be reached from local/dev. Use a test action below.</p>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;">
+    <a href="{$successSafe}" style="padding:10px 16px;background:#16a34a;color:#fff;border-radius:8px;text-decoration:none;">Simulate Success</a>
+    <a href="{$failSafe}" style="padding:10px 16px;background:#dc2626;color:#fff;border-radius:8px;text-decoration:none;">Simulate Fail</a>
+    <a href="{$cancelSafe}" style="padding:10px 16px;background:#6b7280;color:#fff;border-radius:8px;text-decoration:none;">Simulate Cancel</a>
+  </div>
+</body>
+</html>
+HTML;
+
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
+
+    public function sslCommerzSuccess(Request $request): HttpResponse
+    {
+        $dealId = trim((string) ($request->input('value_a') ?: $request->input('deal_id')));
+        $tranId = trim((string) $request->input('tran_id'));
+        $status = strtoupper(trim((string) $request->input('status')));
+        $isSuccess = $status === '' || in_array($status, ['VALID', 'VALIDATED', 'SUCCESS'], true);
+
+        if ($dealId !== '' && $isSuccess) {
+            $deal = DB::table('crop_deals')->where('id', $dealId)->first();
+            if ($deal && $this->cropDealPaymentColumnsAvailable()) {
+                DB::table('crop_deals')->where('id', $dealId)->update([
+                    'payment_status' => 'paid',
+                    'updated_at' => now(),
+                ]);
+
+                $companyUserId = DB::table('companies')->where('id', $deal->company_id)->value('user_id')
+                    ?: DB::table('companies')->where('user_id', $deal->company_id)->value('user_id');
+                $companyTargets = array_values(array_filter(array_unique([$deal->company_id, $companyUserId])));
+                foreach ($companyTargets as $recipientId) {
+                    $this->createNotification(
+                        $recipientId,
+                        'payment',
+                        'Payment Confirmed',
+                        "Sandbox payment completed for deal {$dealId}. You can place order now.",
+                        ['push', 'email'],
+                    );
+                }
+            }
+        }
+
+        return $this->sslPaymentPopupResponse(
+            'success',
+            $dealId,
+            $tranId,
+            'Payment successful. You can return to the Company Dashboard.',
+        );
+    }
+
+    public function sslCommerzFail(Request $request): HttpResponse
+    {
+        $dealId = trim((string) ($request->input('value_a') ?: $request->input('deal_id')));
+        $tranId = trim((string) $request->input('tran_id'));
+
+        if ($dealId !== '' && $this->cropDealPaymentColumnsAvailable()) {
+            DB::table('crop_deals')->where('id', $dealId)->update([
+                'payment_status' => 'failed',
+                'updated_at' => now(),
+            ]);
+        }
+
+        return $this->sslPaymentPopupResponse(
+            'failed',
+            $dealId,
+            $tranId,
+            'Payment failed. Please try Pay Now again.',
+        );
+    }
+
+    public function sslCommerzCancel(Request $request): HttpResponse
+    {
+        $dealId = trim((string) ($request->input('value_a') ?: $request->input('deal_id')));
+        $tranId = trim((string) $request->input('tran_id'));
+
+        if ($dealId !== '' && $this->cropDealPaymentColumnsAvailable()) {
+            DB::table('crop_deals')->where('id', $dealId)->update([
+                'payment_status' => 'pending',
+                'updated_at' => now(),
+            ]);
+        }
+
+        return $this->sslPaymentPopupResponse(
+            'cancelled',
+            $dealId,
+            $tranId,
+            'Payment was cancelled.',
+        );
+    }
+
+    public function sslCommerzMockGateway(Request $request): HttpResponse
+    {
+        $dealId = trim((string) $request->query('deal_id'));
+        $tranId = trim((string) $request->query('tran_id'));
+        $amount = trim((string) $request->query('amount', '0'));
+        $base = rtrim((string) env('APP_URL', 'http://localhost:8000'), '/').'/api/v1/payments/sslcommerz';
+        $successUrl = $base.'/success?'.http_build_query([
+            'value_a' => $dealId,
+            'tran_id' => $tranId,
+            'status' => 'VALID',
+        ]);
+        $failUrl = $base.'/fail?'.http_build_query([
+            'value_a' => $dealId,
+            'tran_id' => $tranId,
+            'status' => 'FAILED',
+        ]);
+        $cancelUrl = $base.'/cancel?'.http_build_query([
+            'value_a' => $dealId,
+            'tran_id' => $tranId,
+            'status' => 'CANCELLED',
+        ]);
+
+        $dealSafe = htmlspecialchars($dealId, ENT_QUOTES, 'UTF-8');
+        $tranSafe = htmlspecialchars($tranId, ENT_QUOTES, 'UTF-8');
+        $amountSafe = htmlspecialchars($amount, ENT_QUOTES, 'UTF-8');
+        $successSafe = htmlspecialchars($successUrl, ENT_QUOTES, 'UTF-8');
+        $failSafe = htmlspecialchars($failUrl, ENT_QUOTES, 'UTF-8');
+        $cancelSafe = htmlspecialchars($cancelUrl, ENT_QUOTES, 'UTF-8');
+
+        $html = <<<HTML
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>SSLCommerz Sandbox Mock</title></head>
+<body style="font-family: sans-serif; max-width: 640px; margin: 48px auto; padding: 24px;">
+  <h2>SSLCommerz Sandbox (Local Mock)</h2>
+  <p>Deal ID: <strong>{$dealSafe}</strong></p>
+  <p>Transaction ID: <strong>{$tranSafe}</strong></p>
+  <p>Amount: <strong>BDT {$amountSafe}</strong></p>
+  <p>External sandbox could not be reached from local/dev. Use a test action below.</p>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;">
+    <a href="{$successSafe}" style="padding:10px 16px;background:#16a34a;color:#fff;border-radius:8px;text-decoration:none;">Simulate Success</a>
+    <a href="{$failSafe}" style="padding:10px 16px;background:#dc2626;color:#fff;border-radius:8px;text-decoration:none;">Simulate Fail</a>
+    <a href="{$cancelSafe}" style="padding:10px 16px;background:#6b7280;color:#fff;border-radius:8px;text-decoration:none;">Simulate Cancel</a>
+  </div>
+</body>
+</html>
+HTML;
+
+        return response($html, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
+
+    private function sslPaymentPopupResponse(string $status, string $dealId, string $tranId, string $message): HttpResponse
+    {
+        $payload = json_encode([
+            'type' => 'sslcommerz-payment-status',
+            'status' => $status,
+            'dealId' => $dealId,
+            'tranId' => $tranId,
+            'message' => $message,
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        $safeMessage = htmlspecialchars($message, ENT_QUOTES, 'UTF-8');
+        $script = <<<HTML
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Payment Status</title></head>
+<body style="font-family: sans-serif; padding: 24px;">
+<h3>{$safeMessage}</h3>
+<p>You can close this tab now.</p>
+<script>
+(function () {
+  var payload = {$payload};
+  try {
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage(payload, '*');
+    }
+  } catch (e) {}
+  setTimeout(function () { window.close(); }, 1200);
+})();
+</script>
+</body>
+</html>
+HTML;
+
+        return response($script, 200)->header('Content-Type', 'text/html; charset=UTF-8');
+    }
+
+    private function sslCommerzMockGatewayUrl(string $dealId, string $tranId, string $amount): string
+    {
+        $base = rtrim((string) env('APP_URL', 'http://localhost:8000'), '/').'/api/v1/payments/sslcommerz/mock-gateway';
+
+        return $base.'?'.http_build_query([
+            'deal_id' => $dealId,
+            'tran_id' => $tranId,
+            'amount' => $amount,
+        ]);
+    }
+
+    private function stripeMockGatewayUrl(string $dealId, int $amountMinor, string $currency): string
+    {
+        $base = rtrim((string) env('APP_URL', 'http://localhost:8000'), '/').'/api/v1/payments/stripe/mock-gateway';
+
+        return $base.'?'.http_build_query([
+            'deal_id' => $dealId,
+            'amount' => $amountMinor,
+            'currency' => $currency,
+        ]);
+    }
+
+    private function orderStripeMockGatewayUrl(string $orderId, int $amountMinor, string $currency, string $farmerId): string
+    {
+        $base = rtrim((string) env('APP_URL', 'http://localhost:8000'), '/').'/api/v1/payments/orders/stripe/mock-gateway';
+
+        return $base.'?'.http_build_query([
+            'order_id' => $orderId,
+            'farmer_id' => $farmerId,
+            'amount' => $amountMinor,
+            'currency' => $currency,
+        ]);
     }
 
     public function cropPrices(): JsonResponse
@@ -1390,6 +3075,53 @@ class AgroSyncController extends Controller
         return $this->ok(['success' => true]);
     }
 
+    public function deleteUserAccount(string $userId): JsonResponse
+    {
+        $user = DB::table('users')->where('public_id', $userId)->first();
+
+        if (! $user) {
+            return $this->fail('User not found.', 404);
+        }
+
+        DB::transaction(function () use ($user): void {
+            $roleRecordId = match ($user->role) {
+                'farmer' => DB::table('farmers')->where('user_id', $user->public_id)->value('id'),
+                'officer' => DB::table('officers')->where('user_id', $user->public_id)->value('id'),
+                'vendor' => DB::table('vendors')->where('user_id', $user->public_id)->value('id'),
+                'company' => DB::table('companies')->where('user_id', $user->public_id)->value('id'),
+                default => null,
+            };
+
+            DB::table('notifications')->where('user_id', $user->public_id)->delete();
+            DB::table('user_settings')->where('user_id', $user->public_id)->delete();
+            DB::table('auth_otps')
+                ->where('user_id', $user->public_id)
+                ->orWhere('email', $this->normalizedEmail($user->email))
+                ->delete();
+
+            DB::table('cooperatives')
+                ->where('leader_id', $user->public_id)
+                ->update(['leader_id' => null, 'updated_at' => now()]);
+
+            DB::table('tenants')
+                ->where('admin_user_id', $user->public_id)
+                ->update(['admin_user_id' => null, 'updated_at' => now()]);
+
+            match ($user->role) {
+                'farmer' => DB::table('farmers')->where('id', $roleRecordId)->delete(),
+                'officer' => DB::table('officers')->where('id', $roleRecordId)->delete(),
+                'vendor' => DB::table('vendors')->where('id', $roleRecordId)->delete(),
+                'company' => DB::table('companies')->where('id', $roleRecordId)->delete(),
+                default => null,
+            };
+
+            DB::table('sessions')->where('user_id', $user->id)->delete();
+            DB::table('users')->where('public_id', $user->public_id)->delete();
+        });
+
+        return $this->ok(['success' => true]);
+    }
+
     public function tenants(): JsonResponse
     {
         return $this->ok(DB::table('tenants')->orderByDesc('created_at')->get()->map(fn ($tenant) => [
@@ -1444,16 +3176,118 @@ class AgroSyncController extends Controller
 
     public function adminStats(): JsonResponse
     {
+        $supportsSettlement = $this->orderSettlementColumnsAvailable();
+        $ordersQuery = DB::table('orders');
+        $releasedAmount = $supportsSettlement
+            ? (float) DB::table('orders')->where('settlement_status', 'released')->sum('total_amount')
+            : 0.0;
+        $heldAmount = $supportsSettlement
+            ? (float) DB::table('orders')->whereIn('settlement_status', ['held', 'ready_for_release'])->sum('total_amount')
+            : 0.0;
+
         return $this->ok([
             'totalFarmers' => DB::table('farmers')->count(),
             'totalOfficers' => DB::table('officers')->count(),
             'totalVendors' => DB::table('vendors')->count(),
             'totalAdvisories' => DB::table('advisory_cases')->count(),
             'activeAdvisories' => DB::table('advisory_cases')->whereNotIn('status', ['closed', 'responded'])->count(),
+            'totalOrders' => $ordersQuery->count(),
+            'pendingSettlements' => $supportsSettlement ? DB::table('orders')->where('settlement_status', 'ready_for_release')->count() : 0,
+            'heldSettlementAmount' => $heldAmount,
+            'releasedSettlementAmount' => $releasedAmount,
             'mrr' => (float) DB::table('tenants')->sum('mrr'),
             'uptime' => 99.98,
             'advisoryDeliveryRate' => 96.4,
         ]);
+    }
+
+    public function updateFarmerAdminState(Request $request, string $farmerId): JsonResponse
+    {
+        $farmer = DB::table('farmers')->where('id', $farmerId)->first();
+        if (! $farmer) {
+            return $this->fail('Farmer not found.', 404);
+        }
+
+        $payload = ['updated_at' => now()];
+        $hasChange = false;
+
+        if ($request->exists('verified')) {
+            $payload['verified'] = $request->boolean('verified');
+            $hasChange = true;
+        }
+
+        if ($request->exists('blocked')) {
+            $payload['blocked'] = $request->boolean('blocked');
+            $hasChange = true;
+        }
+
+        if (! $hasChange) {
+            return $this->fail('No farmer moderation field provided.');
+        }
+
+        DB::table('farmers')->where('id', $farmerId)->update($payload);
+
+        $verifiedLabel = array_key_exists('verified', $payload) ? ((bool) $payload['verified'] ? 'verified' : 'unverified') : null;
+        $blockedLabel = array_key_exists('blocked', $payload) ? ((bool) $payload['blocked'] ? 'blocked' : 'unblocked') : null;
+        $details = collect([$verifiedLabel, $blockedLabel])->filter()->implode(', ');
+        $this->createAuditLog('farmer', 'moderate', 'Super Admin', trim("Updated farmer {$farmerId} state: {$details}."));
+
+        return $this->ok(['success' => true]);
+    }
+
+    public function updateOfficerAdminState(Request $request, string $officerId): JsonResponse
+    {
+        $officer = DB::table('officers')
+            ->where('id', $officerId)
+            ->orWhere('user_id', $officerId)
+            ->orWhere('officer_id', $officerId)
+            ->first();
+        if (! $officer) {
+            return $this->fail('Officer not found.', 404);
+        }
+
+        $payload = ['updated_at' => now()];
+        $hasChange = false;
+
+        if ($request->exists('active')) {
+            $isActive = $request->boolean('active');
+            $payload['active'] = $isActive;
+            $payload['availability_status'] = $isActive ? 'available' : 'offline';
+            $hasChange = true;
+        }
+
+        if ($request->exists('assignedRegion') || $request->exists('regionDistricts')) {
+            $regionDistricts = $request->exists('regionDistricts')
+                ? collect($request->input('regionDistricts', []))
+                : collect(explode(',', (string) $request->input('assignedRegion', '')));
+            $regionDistricts = $regionDistricts
+                ->map(fn ($item) => trim((string) $item))
+                ->filter(fn ($item) => $item !== '')
+                ->values();
+
+            $payload['region_districts'] = json_encode($regionDistricts->all());
+            $hasChange = true;
+
+            $primaryDistrict = $regionDistricts->first();
+            if ($primaryDistrict) {
+                DB::table('users')
+                    ->where('public_id', $officer->user_id)
+                    ->update(['district' => $primaryDistrict, 'updated_at' => now()]);
+            }
+        }
+
+        if (! $hasChange) {
+            return $this->fail('No officer moderation field provided.');
+        }
+
+        DB::table('officers')->where('id', $officer->id)->update($payload);
+
+        $activeLabel = array_key_exists('active', $payload) ? ((bool) $payload['active'] ? 'activated' : 'disabled') : null;
+        $regionLabel = array_key_exists('region_districts', $payload) ? 'region updated' : null;
+        $details = collect([$activeLabel, $regionLabel])->filter()->implode(', ');
+        $this->createAuditLog('officer', 'update', 'Super Admin', trim("Updated officer {$officer->id} state: {$details}."));
+
+        return $this->ok(['success' => true]);
     }
 
     public function auditLogs(): JsonResponse
@@ -1483,6 +3317,19 @@ class AgroSyncController extends Controller
         ]);
     }
 
+    private function createAuditLog(string $entity, string $action, string $actor, string $details): void
+    {
+        DB::table('audit_logs')->insert([
+            'id' => 'audit_'.Str::random(12),
+            'entity' => $entity,
+            'action' => $action,
+            'actor' => $actor,
+            'details' => $details,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
     private function notificationSettingsForUser(string $userId): object
     {
         return DB::table('user_settings')->where('user_id', $userId)->first() ?: (object) [
@@ -1496,49 +3343,13 @@ class AgroSyncController extends Controller
 
     private function notifyOfficersForAdvisory(object $farmer, string $caseId, string $cropType, string $priority): void
     {
-        $district = trim((string) ($farmer->district ?? ''));
-
         $officers = DB::table('officers')
             ->join('users', 'users.public_id', '=', 'officers.user_id')
             ->select('users.public_id as user_id', 'users.name', 'users.district as user_district', 'officers.region_districts')
             ->where('users.role', 'officer')
-            ->where('officers.tenant_id', $farmer->tenant_id)
             ->get();
 
-        $normalizedDistrict = strtolower($district);
-        $eligibleOfficers = $officers->filter(function (object $officer) use ($district, $normalizedDistrict) {
-            if ($district === '') {
-                return true;
-            }
-
-            $districts = collect($this->arrayValue($officer->region_districts))
-                ->map(fn ($value) => strtolower(trim((string) $value)))
-                ->filter()
-                ->values();
-
-            $officerHomeDistrict = strtolower(trim((string) ($officer->user_district ?? '')));
-
-            return $districts->contains($normalizedDistrict) || $officerHomeDistrict === $normalizedDistrict;
-        })->values();
-
-        if ($priority === 'urgent' && $eligibleOfficers->isEmpty()) {
-            $eligibleOfficers = $officers;
-        }
-
-        foreach ($eligibleOfficers as $officer) {
-            $districts = collect($this->arrayValue($officer->region_districts))
-                ->map(fn ($value) => strtolower(trim((string) $value)))
-                ->filter()
-                ->values();
-            $officerHomeDistrict = strtolower(trim((string) ($officer->user_district ?? '')));
-            $matchesDistrict = $district === ''
-                || $districts->contains($normalizedDistrict)
-                || $officerHomeDistrict === $normalizedDistrict;
-
-            if ($priority !== 'urgent' && ! $matchesDistrict) {
-                continue;
-            }
-
+        foreach ($officers as $officer) {
             $settings = $this->notificationSettingsForUser($officer->user_id);
             $shouldNotify = $priority === 'urgent'
                 ? (bool) $settings->urgent_advisory
@@ -1549,7 +3360,7 @@ class AgroSyncController extends Controller
             }
 
             $priorityLabel = $priority === 'urgent' ? 'Urgent' : 'Normal';
-            $location = implode(', ', array_values(array_filter([$farmer->upazila ?? null, $district, $farmer->division ?? null])));
+            $location = implode(', ', array_values(array_filter([$farmer->upazila ?? null, $farmer->district ?? null, $farmer->division ?? null])));
 
             $this->createNotification(
                 $officer->user_id,

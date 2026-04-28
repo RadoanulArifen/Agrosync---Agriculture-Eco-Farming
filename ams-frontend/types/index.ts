@@ -135,7 +135,8 @@ export interface Product {
   isRecommended?: boolean;
 }
 
-export type OrderStatus = 'pending' | 'confirmed' | 'dispatched' | 'delivered' | 'cancelled' | 'returned';
+export type OrderStatus = 'pending' | 'confirmed' | 'accepted' | 'dispatched' | 'delivered' | 'completed' | 'cancelled' | 'returned';
+export type PaymentGateway = 'bkash' | 'nagad' | 'cod' | 'stripe';
 
 export interface OrderItem {
   productId: string;
@@ -154,8 +155,11 @@ export interface Order {
   items: OrderItem[];
   totalAmount: number;
   status: OrderStatus;
-  paymentGateway: 'bkash' | 'nagad' | 'cod' | 'stripe';
+  paymentGateway: PaymentGateway;
   paymentStatus: 'paid' | 'pending' | 'failed';
+  settlementStatus?: 'held' | 'ready_for_release' | 'released';
+  settlementReleasedAt?: string;
+  settlementReleasedBy?: string;
   placedAt: string;
   deliveredAt?: string;
   estimatedDelivery: string;
@@ -197,8 +201,10 @@ export interface CropDeal {
   quantityKg: number;
   commissionPct: number;
   commissionAmt: number;
-  status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
+  status: 'pending' | 'confirmed' | 'negotiating' | 'locked' | 'order_placed' | 'accepted' | 'delivered' | 'completed' | 'cancelled';
   confirmedAt?: string;
+  paymentGateway?: PaymentGateway;
+  paymentStatus?: 'paid' | 'pending' | 'failed';
 }
 
 // ============================================================
@@ -243,7 +249,7 @@ export interface WeatherForecast {
 // NOTIFICATION TYPES
 // ============================================================
 export type NotificationChannel = 'sms' | 'email' | 'push' | 'whatsapp';
-export type NotificationType = 'advisory' | 'order' | 'price_alert' | 'weather' | 'payment' | 'system';
+export type NotificationType = 'advisory' | 'order' | 'price_alert' | 'weather' | 'payment' | 'system' | 'crop_deal';
 
 export interface Notification {
   id: string;
@@ -281,6 +287,10 @@ export interface AdminStats {
   totalVendors: number;
   totalAdvisories: number;
   activeAdvisories: number;
+  totalOrders?: number;
+  pendingSettlements?: number;
+  heldSettlementAmount?: number;
+  releasedSettlementAmount?: number;
   mrr: number;
   uptime: string;
   advisoryDeliveryRate: number;

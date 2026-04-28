@@ -25,13 +25,50 @@ export default function FarmerDashboard() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
   useEffect(() => {
-    if (!farmer) return;
+    if (!farmer) return undefined;
 
-    advisoryService.getAdvisoryCases(farmer.id).then(setCases);
-    orderService.getOrders(farmer.id).then(setOrders);
-    priceService.getCropPrices().then(setPrices);
-    weatherService.getWeatherForecast(farmer.district, farmer.upazila).then(setWeather);
-    notificationService.getNotifications(farmer.id).then(setNotifications);
+    let active = true;
+
+    const refreshDashboard = async () => {
+      if (!active) return;
+
+      const [nextCases, nextOrders, nextPrices, nextWeather, nextNotifications] = await Promise.all([
+        advisoryService.getAdvisoryCases(farmer.id),
+        orderService.getOrders(farmer.id),
+        priceService.getCropPrices(),
+        weatherService.getWeatherForecast(farmer.district, farmer.upazila),
+        notificationService.getNotifications(farmer.id),
+      ]);
+
+      if (!active) return;
+      setCases(nextCases);
+      setOrders(nextOrders);
+      setPrices(nextPrices);
+      setWeather(nextWeather);
+      setNotifications(nextNotifications);
+    };
+
+    void refreshDashboard();
+
+    const intervalId = window.setInterval(() => {
+      void refreshDashboard();
+    }, 5000);
+    const handleRefresh = () => {
+      void refreshDashboard();
+    };
+    window.addEventListener('focus', handleRefresh);
+    window.addEventListener('storage', handleRefresh);
+    window.addEventListener('ams:notifications-updated', handleRefresh);
+    window.addEventListener('ams:user-session-updated', handleRefresh);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleRefresh);
+      window.removeEventListener('storage', handleRefresh);
+      window.removeEventListener('ams:notifications-updated', handleRefresh);
+      window.removeEventListener('ams:user-session-updated', handleRefresh);
+    };
   }, [farmer]);
 
   if (loading || !farmer) {

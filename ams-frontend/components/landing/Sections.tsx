@@ -1,10 +1,12 @@
 'use client';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { Star, ShoppingCart, ArrowRight, ChevronLeft, ChevronRight, Check } from 'lucide-react';
-import { productService } from '@/services';
+import { authService, productService } from '@/services';
 import { MOCK_TESTIMONIALS } from '@/services/mockData';
 import { MOCK_BLOG_POSTS } from '@/services/mockData';
+import { DASHBOARD_ROUTES } from '@/constants';
 import type { Product } from '@/types';
 import { formatBDT, formatDate } from '@/utils';
 
@@ -21,12 +23,6 @@ type ProductsSectionProps = {
 const AGRICULTURE_PRODUCT_CATEGORIES = ['Fertilizer', 'Pesticide', 'Seed', 'Medicine', 'Equipment'];
 const FARMER_PRODUCT_CATEGORIES = ['Organic', 'Fresh Vegetables', 'Dairy'];
 
-const getProductBuyerRoute = (category: string) => (
-  AGRICULTURE_PRODUCT_CATEGORIES.includes(category)
-    ? '/auth/farmer-login'
-    : '/auth/admin-login?role=company'
-);
-
 export function ProductsSection({
   eyebrow = 'Latest Projects List',
   heading = 'Featured Products',
@@ -35,6 +31,7 @@ export function ProductsSection({
   category,
   group,
 }: ProductsSectionProps) {
+  const router = useRouter();
   const [products, setProducts] = useState<Product[]>([]);
 
   useEffect(() => {
@@ -54,6 +51,27 @@ export function ProductsSection({
       isMounted = false;
     };
   }, [category, group]);
+
+  const handlePurchaseFromHome = (product: Product) => {
+    const currentFarmer = authService.getCurrentFarmer();
+    if (currentFarmer?.id) {
+      router.push(`/dashboard/farmer/marketplace?addProduct=${encodeURIComponent(product.id)}`);
+      return;
+    }
+
+    const currentUser = authService.getCurrentUser();
+    if (currentUser?.role === 'farmer') {
+      router.push(`/dashboard/farmer/marketplace?addProduct=${encodeURIComponent(product.id)}`);
+      return;
+    }
+
+    if (currentUser?.role && currentUser.role in DASHBOARD_ROUTES) {
+      router.push(DASHBOARD_ROUTES[currentUser.role as keyof typeof DASHBOARD_ROUTES]);
+      return;
+    }
+
+    router.push('/auth/farmer-login');
+  };
 
   return (
     <section id="products" className="py-20 bg-gray-50">
@@ -100,13 +118,14 @@ export function ProductsSection({
                     <div className="text-xl font-bold text-forest">{formatBDT(product.price)}</div>
                     <div className="text-xs text-gray-400">per {product.unit}</div>
                   </div>
-                  <Link
-                    href={getProductBuyerRoute(product.category)}
+                  <button
+                    type="button"
+                    onClick={() => handlePurchaseFromHome(product)}
                     className="flex items-center gap-2 bg-forest text-white text-sm px-4 py-2 rounded-xl hover:bg-forest-light transition-colors"
                   >
                     <ShoppingCart className="w-4 h-4" />
                     Add to Cart
-                  </Link>
+                  </button>
                 </div>
               </div>
             </div>

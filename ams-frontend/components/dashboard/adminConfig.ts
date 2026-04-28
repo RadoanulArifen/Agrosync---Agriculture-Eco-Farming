@@ -1,5 +1,5 @@
 import {
-  Activity, Building2, CreditCard, LayoutDashboard, Map, MessageSquare, Package,
+  Activity, Building2, CreditCard, LayoutDashboard, Map, MessageSquare, Package, ShoppingCart,
   Settings, TrendingUp, User, UserCheck, Users,
 } from 'lucide-react';
 import type { NavItem } from '@/components/dashboard/DashboardShell';
@@ -10,6 +10,7 @@ export const ADMIN_NAV_ITEMS: NavItem[] = [
   { href: '/dashboard/admin/farmers', label: 'Farmers', icon: Users },
   { href: '/dashboard/admin/officers', label: 'Officers', icon: UserCheck },
   { href: '/dashboard/admin/vendors', label: 'Vendors', icon: Package },
+  { href: '/dashboard/admin/orders', label: 'Order Control', icon: ShoppingCart },
   { href: '/dashboard/admin/advisory', label: 'Advisory Cases', icon: MessageSquare },
   { href: '/dashboard/admin/regional-map', label: 'Regional Map', icon: Map },
   { href: '/dashboard/admin/billing', label: 'Billing', icon: CreditCard },

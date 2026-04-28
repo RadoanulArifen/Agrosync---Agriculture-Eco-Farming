@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { ShoppingCart, Star, Trash2, Wallet } from 'lucide-react';
 import DashboardShell from '@/components/dashboard/DashboardShell';
 import { Card, EmptyState, PageHeader, SectionHeader } from '@/components/dashboard/DashboardComponents';
@@ -10,8 +11,10 @@ import type { Product } from '@/types';
 import { formatBDT } from '@/utils';
 
 type PaymentGateway = 'bkash' | 'nagad' | 'cod' | 'stripe';
+const AGRICULTURE_PRODUCT_CATEGORIES = ['Fertilizer', 'Pesticide', 'Seed', 'Medicine', 'Equipment'] as const;
 
 export default function FarmerMarketplacePage() {
+  const searchParams = useSearchParams();
   const { farmer, unreadNotifications, loading } = useFarmerContext();
   const [products, setProducts] = useState<Product[]>([]);
   const [cartItems, setCartItems] = useState<{ product: Product; quantity: number }[]>([]);
@@ -20,6 +23,7 @@ export default function FarmerMarketplacePage() {
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const autoAddedProductRef = useRef<string | null>(null);
 
   const loadCart = async (farmerId: string) => {
     const cart = await cartService.getCart(farmerId);
@@ -27,13 +31,46 @@ export default function FarmerMarketplacePage() {
   };
 
   useEffect(() => {
-    productService.getProducts().then(setProducts);
+    productService.getProducts().then((items) => {
+      setProducts(items.filter((item) => AGRICULTURE_PRODUCT_CATEGORIES.includes(item.category as (typeof AGRICULTURE_PRODUCT_CATEGORIES)[number])));
+    });
   }, []);
 
   useEffect(() => {
     if (!farmer) return;
     loadCart(farmer.id);
   }, [farmer]);
+
+  useEffect(() => {
+    if (!searchParams) return;
+    const addProductId = searchParams.get('addProduct');
+    if (!farmer || !addProductId) return;
+    if (autoAddedProductRef.current === addProductId) return;
+
+    autoAddedProductRef.current = addProductId;
+
+    let cancelled = false;
+
+    const autoAddFromHome = async () => {
+      const result = await cartService.addToCart(farmer.id, addProductId, 1);
+      if (cancelled) return;
+
+      if (!result.success) {
+        setError(result.message || 'Failed to add product to cart.');
+        return;
+      }
+
+      await loadCart(farmer.id);
+      if (cancelled) return;
+      setMessage('Product added to cart. You can complete purchase from Cart Summary.');
+    };
+
+    void autoAddFromHome();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [farmer?.id, searchParams]);
 
   const filteredProducts = useMemo(() => (
     selectedCategory === 'All'
@@ -90,6 +127,27 @@ export default function FarmerMarketplacePage() {
       return;
     }
 
+    if (paymentGateway === 'stripe' && result.orderId) {
+      const payment = await orderService.initiateOrderStripePayment({
+        orderId: result.orderId,
+        farmerId: farmer.id,
+      });
+
+      if (!payment.success) {
+        setError(payment.message || `Order ${result.orderId} placed, but Stripe checkout could not be started.`);
+        await loadCart(farmer.id);
+        return;
+      }
+
+      if (payment.gatewayPageUrl) {
+        window.open(payment.gatewayPageUrl, '_blank', 'noopener,noreferrer');
+      }
+
+      await loadCart(farmer.id);
+      setMessage(`Order ${result.orderId} created. Complete Stripe sandbox payment in the opened window.`);
+      return;
+    }
+
     await loadCart(farmer.id);
     setMessage(`Order placed successfully. Order ID: ${result.orderId}`);
   };
@@ -103,7 +161,7 @@ export default function FarmerMarketplacePage() {
           <Card className="mb-6">
             <SectionHeader title="Categories" subtitle="Filter marketplace products" />
             <div className="flex gap-2 flex-wrap">
-              {['All', 'Fertilizer', 'Pesticide', 'Seed', 'Medicine', 'Equipment', 'Organic', 'Fresh Vegetables', 'Dairy'].map((category) => (
+              {['All', ...AGRICULTURE_PRODUCT_CATEGORIES].map((category) => (
                 <button
                   key={category}
                   type="button"

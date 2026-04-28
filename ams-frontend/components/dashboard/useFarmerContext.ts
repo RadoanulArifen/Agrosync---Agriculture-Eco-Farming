@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import {
   LayoutDashboard, MessageSquare, ShoppingCart, Wheat,
-  TrendingUp, CloudRain, Bell, User, Package,
+  TrendingUp, CloudRain, Bell, User, Package, Handshake,
 } from 'lucide-react';
 import { authService, notificationService } from '@/services';
 import type { Farmer } from '@/types';
@@ -14,7 +14,9 @@ export const FARMER_NAV_ITEMS: NavItem[] = [
   { href: '/dashboard/farmer/advisory', label: 'Crop Advisory', icon: MessageSquare },
   { href: '/dashboard/farmer/marketplace', label: 'Marketplace', icon: ShoppingCart },
   { href: '/dashboard/farmer/crop-listings', label: 'My Crop Listings', icon: Wheat },
-  { href: '/dashboard/farmer/orders', label: 'My Orders', icon: Package },
+  { href: '/dashboard/farmer/deals', label: 'Deals', icon: Handshake },
+  { href: '/dashboard/farmer/sales-orders', label: 'Sales Orders', icon: Package },
+  { href: '/dashboard/farmer/orders', label: 'My Orders Tracking', icon: Package },
   { href: '/dashboard/farmer/prices', label: 'Price Tracker', icon: TrendingUp },
   { href: '/dashboard/farmer/weather', label: 'Weather', icon: CloudRain },
   { href: '/dashboard/farmer/notifications', label: 'Notifications', icon: Bell },
@@ -61,7 +63,7 @@ export function useFarmerContext() {
     syncNotificationCount();
 
     const handleStorage = (event: StorageEvent) => {
-      if (event.key && !['ams_notifications', 'ams_role_users', 'ams_current_role_user_id', 'ams_current_farmer_id'].includes(event.key)) return;
+      if (event.key && !['ams_notifications', 'ams_notifications_sync', 'ams_role_users', 'ams_current_role_user_id', 'ams_current_role_user_ids_by_role', 'ams_current_farmer_id'].includes(event.key)) return;
       syncNotificationCount();
     };
 
@@ -73,12 +75,17 @@ export function useFarmerContext() {
       syncNotificationCount();
     };
 
+    const intervalId = window.setInterval(() => {
+      syncNotificationCount();
+    }, 5000);
+
     window.addEventListener('storage', handleStorage);
     window.addEventListener('focus', handleNotificationsUpdated);
     window.addEventListener('ams:notifications-updated', handleNotificationsUpdated);
     window.addEventListener('ams:user-session-updated', handleUserSessionUpdated);
 
     return () => {
+      window.clearInterval(intervalId);
       window.removeEventListener('storage', handleStorage);
       window.removeEventListener('focus', handleNotificationsUpdated);
       window.removeEventListener('ams:notifications-updated', handleNotificationsUpdated);

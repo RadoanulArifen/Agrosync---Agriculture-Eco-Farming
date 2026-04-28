@@ -9,7 +9,7 @@ import type {
   Farmer, Product, Order, AdvisoryCase, CropListing,
   CropPrice, WeatherForecast, Notification, BlogPost, ProductCategory,
   Testimonial, AdminStats, Tenant, Officer, DashboardRoleUser, ManagedUserRole, CropDeal,
-  UserSettings, AdvisoryPriority,
+  UserSettings, AdvisoryPriority, PaymentGateway,
 } from '@/types';
 
 import {
@@ -26,6 +26,8 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') || '';
 const API_V1 = API_BASE_URL ? `${API_BASE_URL}/api/v1` : '';
 const NOTIFICATIONS_UPDATED_EVENT = 'ams:notifications-updated';
 const USER_SESSION_UPDATED_EVENT = 'ams:user-session-updated';
+const NOTIFICATION_SYNC_STORAGE_KEY = 'ams_notifications_sync';
+const DEMO_CROP_LISTING_IDS = new Set(['CRP-001', 'CRP-002']);
 const DEFAULT_USER_SETTINGS: UserSettings = {
   emailNotifications: true,
   pushNotifications: true,
@@ -264,6 +266,7 @@ const FARMERS_STORAGE_KEY = 'ams_mock_farmers';
 const CURRENT_FARMER_STORAGE_KEY = 'ams_current_farmer_id';
 const ROLE_USERS_STORAGE_KEY = 'ams_role_users';
 const CURRENT_ROLE_USER_STORAGE_KEY = 'ams_current_role_user_id';
+const CURRENT_ROLE_USER_IDS_BY_ROLE_STORAGE_KEY = 'ams_current_role_user_ids_by_role';
 const ADVISORY_CASES_STORAGE_KEY = 'ams_advisory_cases';
 const NOTIFICATIONS_STORAGE_KEY = 'ams_notifications';
 const ORDERS_STORAGE_KEY = 'ams_orders';
@@ -279,6 +282,7 @@ const ADMIN_OFFICER_META_STORAGE_KEY = 'ams_admin_officer_meta';
 const ADMIN_VENDOR_META_STORAGE_KEY = 'ams_admin_vendor_meta';
 const ADMIN_CASE_META_STORAGE_KEY = 'ams_admin_case_meta';
 const ADMIN_AUDIT_LOG_STORAGE_KEY = 'ams_admin_audit_logs';
+const ADMIN_ORDER_SETTLEMENT_META_STORAGE_KEY = 'ams_admin_order_settlement_meta';
 const DEMO_ADVISORY_CASE_IDS = new Set([
   'ADV-2026-0000001',
   'ADV-2026-0000002',
@@ -311,6 +315,20 @@ let cropDealsStore: CropDeal[] = [
 ];
 let tenantsStore: Tenant[] = [...MOCK_TENANTS];
 
+const normalizeOrderSettlement = (order: Order): Order => {
+  const fallbackSettlementStatus: Order['settlementStatus'] = (
+    order.settlementStatus
+    || (order.status === 'delivered' && order.paymentStatus === 'paid' ? 'ready_for_release' : 'held')
+  );
+
+  return {
+    ...order,
+    settlementStatus: fallbackSettlementStatus,
+    settlementReleasedAt: order.settlementReleasedAt,
+    settlementReleasedBy: order.settlementReleasedBy,
+  };
+};
+
 const sanitizeAdvisoryCases = (cases: AdvisoryCase[]) => (
   cases.filter((item) => !DEMO_ADVISORY_CASE_IDS.has(item.id))
 );
@@ -327,6 +345,12 @@ const persistStorageItem = (key: string, value: string, label: string) => {
     console.warn(`[MOCK] Failed to persist ${label} to localStorage. Falling back to in-memory state.`, error);
     return false;
   }
+};
+
+const emitNotificationsUpdated = () => {
+  if (!canUseStorage()) return;
+  window.dispatchEvent(new CustomEvent(NOTIFICATIONS_UPDATED_EVENT));
+  persistStorageItem(NOTIFICATION_SYNC_STORAGE_KEY, String(Date.now()), 'notification sync');
 };
 
 const notifyUserSessionUpdated = () => {
@@ -531,7 +555,7 @@ const writeNotificationsStore = (notifications: Notification[]) => {
   notificationsStore = notifications;
   if (canUseStorage()) {
     persistStorageItem(NOTIFICATIONS_STORAGE_KEY, JSON.stringify(notificationsStore), 'notifications store');
-    window.dispatchEvent(new CustomEvent(NOTIFICATIONS_UPDATED_EVENT));
+    emitNotificationsUpdated();
   }
 };
 
@@ -539,26 +563,277 @@ const addNotification = (notification: Notification) => {
   writeNotificationsStore([notification, ...readNotificationsStore()]);
 };
 
+const extractListingIdFromNotification = (message: string): string | undefined => (
+  message.match(/\(([^)]+)\)\.?$/)?.[1]?.trim() || undefined
+);
+
+const extractCompanyNameFromInterestMessage = (message: string): string => {
+  const lower = message.toLowerCase();
+  const interestIndex = lower.indexOf(' expressed interest in ');
+  if (interestIndex > 0) return message.slice(0, interestIndex).trim();
+  const repeatIndex = lower.indexOf(' sent another order request ');
+  if (repeatIndex > 0) return message.slice(0, repeatIndex).trim();
+  return 'Company';
+};
+
+const extractCropTypeFromInterestMessage = (message: string): string => (
+  message.match(/expressed interest in your (.+?) listing/i)?.[1]?.trim()
+  || message.match(/another order request for your (.+?) listing/i)?.[1]?.trim()
+  || 'Crop'
+);
+
+const isNewMatchRequestNotification = (notification: Notification): boolean => (
+  notification.type === 'crop_deal' && notification.title === 'New Match Request'
+);
+
+const resolveCompanyUser = (companyId?: string, companyName?: string) => (
+  readRoleUsersStore().find((user) => (
+    user.role === 'company'
+    && (
+      (companyId && (user.id === companyId || user.companyId === companyId))
+      || (companyName && (
+        user.companyName?.trim().toLowerCase() === companyName.trim().toLowerCase()
+        || user.name.trim().toLowerCase() === companyName.trim().toLowerCase()
+      ))
+    )
+  ))
+);
+
+const resolveFarmerUser = (farmerId?: string, farmerName?: string) => (
+  readRoleUsersStore().find((user) => (
+    user.role === 'farmer'
+    && (
+      (farmerId && user.id === farmerId)
+      || (farmerName && user.name.trim().toLowerCase() === farmerName.trim().toLowerCase())
+    )
+  ))
+);
+
+const resolveCompanyNotificationTargets = (companyId?: string, companyName?: string): string[] => {
+  const companyUser = resolveCompanyUser(companyId, companyName);
+  return Array.from(new Set([companyId, companyUser?.id].filter(Boolean) as string[]));
+};
+
+const resolveFarmerNotificationTargets = (farmerId?: string, farmerName?: string): string[] => {
+  const farmerUser = resolveFarmerUser(farmerId, farmerName);
+  return Array.from(new Set([farmerId, farmerUser?.id].filter(Boolean) as string[]));
+};
+
+const upsertLocalCropDeal = (deal: CropDeal) => {
+  const existingDeals = readCropDealsStore();
+  const duplicateIndex = existingDeals.findIndex((item) => (
+    item.id === deal.id
+    || (
+      item.listingId === deal.listingId
+      && item.companyId === deal.companyId
+      && item.status !== 'cancelled'
+    )
+  ));
+
+  if (duplicateIndex >= 0) {
+    const nextDeals = [...existingDeals];
+    nextDeals[duplicateIndex] = {
+      ...nextDeals[duplicateIndex],
+      ...deal,
+      id: nextDeals[duplicateIndex].id,
+    };
+    writeCropDealsStore(nextDeals);
+    return nextDeals[duplicateIndex];
+  }
+
+  writeCropDealsStore([deal, ...existingDeals]);
+  return deal;
+};
+
+const normalizeDealIdentity = (deal: CropDeal) => (
+  `${deal.listingId}|${deal.companyName.trim().toLowerCase()}|${deal.farmerId}`
+);
+
+const dedupeCropDeals = (deals: CropDeal[]): CropDeal[] => {
+  const byIdentity = new Map<string, CropDeal>();
+
+  deals.forEach((deal) => {
+    const key = normalizeDealIdentity(deal);
+    const existing = byIdentity.get(key);
+
+    if (!existing) {
+      byIdentity.set(key, deal);
+      return;
+    }
+
+    const existingIsCancelled = existing.status === 'cancelled';
+    const nextIsCancelled = deal.status === 'cancelled';
+    if (existingIsCancelled !== nextIsCancelled) {
+      byIdentity.set(key, existingIsCancelled ? deal : existing);
+      return;
+    }
+
+    const existingIsSynthetic = existing.id.startsWith('synced_');
+    const nextIsSynthetic = deal.id.startsWith('synced_');
+    if (existingIsSynthetic !== nextIsSynthetic) {
+      byIdentity.set(key, existingIsSynthetic ? deal : existing);
+      return;
+    }
+
+    const existingTime = new Date(existing.confirmedAt || 0).getTime();
+    const nextTime = new Date(deal.confirmedAt || 0).getTime();
+    if (nextTime >= existingTime) {
+      byIdentity.set(key, deal);
+    }
+  });
+
+  return Array.from(byIdentity.values());
+};
+
+const addCompanyDealDecisionNotifications = (
+  deal: Pick<CropDeal, 'companyId' | 'companyName' | 'farmerName' | 'listingId'>,
+  status: 'confirmed' | 'locked' | 'accepted' | 'cancelled',
+  createdAt = new Date().toISOString(),
+) => {
+  resolveCompanyNotificationTargets(deal.companyId, deal.companyName).forEach((recipientId, index) => {
+    const title = status === 'confirmed'
+      ? 'Deal Accepted by Farmer'
+      : status === 'locked'
+        ? 'Deal Locked by Farmer'
+      : status === 'accepted'
+        ? 'Order Accepted by Farmer'
+        : 'Deal Rejected by Farmer';
+    const message = status === 'confirmed'
+      ? `${deal.farmerName} accepted your offer for listing ${deal.listingId}.`
+      : status === 'locked'
+        ? `${deal.farmerName} locked your final deal terms for listing ${deal.listingId}.`
+      : status === 'accepted'
+        ? `${deal.farmerName} accepted your order for listing ${deal.listingId}.`
+        : `${deal.farmerName} rejected your offer for listing ${deal.listingId}.`;
+
+    addNotification({
+      id: `notif_${Date.now()}_${index}`,
+      userId: recipientId,
+      type: 'crop_deal',
+      title,
+      message,
+      channel: ['push', 'email'],
+      isRead: false,
+      createdAt,
+    });
+  });
+};
+
+const addFarmerDealDecisionNotifications = (
+  deal: Pick<CropDeal, 'farmerId' | 'farmerName' | 'companyName' | 'listingId'>,
+  status: 'confirmed' | 'locked' | 'accepted' | 'cancelled',
+  createdAt = new Date().toISOString(),
+) => {
+  resolveFarmerNotificationTargets(deal.farmerId, deal.farmerName).forEach((recipientId, index) => {
+    const title = status === 'confirmed'
+      ? 'You Accepted the Offer'
+      : status === 'locked'
+        ? 'You Locked the Deal'
+      : status === 'accepted'
+        ? 'You Accepted the Order'
+        : 'You Rejected the Offer';
+    const message = status === 'confirmed'
+      ? `You accepted ${deal.companyName}'s offer for listing ${deal.listingId}.`
+      : status === 'locked'
+        ? `You locked the final deal with ${deal.companyName} for listing ${deal.listingId}.`
+      : status === 'accepted'
+        ? `You accepted ${deal.companyName}'s order for listing ${deal.listingId}.`
+        : `You rejected ${deal.companyName}'s offer for listing ${deal.listingId}.`;
+
+    addNotification({
+      id: `notif_${Date.now()}_farmer_${index}`,
+      userId: recipientId,
+      type: 'crop_deal',
+      title,
+      message,
+      channel: ['push', 'sms'],
+      isRead: false,
+      createdAt,
+    });
+  });
+};
+
+const markFarmerMatchRequestNotificationsResolved = (
+  deal: Pick<CropDeal, 'farmerId' | 'farmerName' | 'companyName' | 'listingId'>,
+) => {
+  const targetUserIds = new Set(resolveFarmerNotificationTargets(deal.farmerId, deal.farmerName));
+  if (!targetUserIds.size) return;
+
+  const normalizedCompanyName = deal.companyName.trim().toLowerCase();
+  const nextNotifications = readNotificationsStore().map((notification) => {
+    if (!targetUserIds.has(notification.userId)) return notification;
+    if (!isNewMatchRequestNotification(notification)) return notification;
+
+    const listingId = extractListingIdFromNotification(notification.message);
+    const companyName = extractCompanyNameFromInterestMessage(notification.message).trim().toLowerCase();
+    if (listingId !== deal.listingId || companyName !== normalizedCompanyName) {
+      return notification;
+    }
+
+    return { ...notification, isRead: true, title: 'Match Request Resolved' };
+  });
+
+  writeNotificationsStore(nextNotifications);
+};
+
+const addFarmerCompanyActionNotifications = (
+  deal: Pick<CropDeal, 'farmerId' | 'farmerName' | 'companyName' | 'listingId'>,
+  status: 'negotiating' | 'locked' | 'order_placed' | 'cancelled' | 'completed',
+  createdAt = new Date().toISOString(),
+) => {
+  resolveFarmerNotificationTargets(deal.farmerId, deal.farmerName).forEach((recipientId, index) => {
+    const title = status === 'negotiating'
+      ? 'Company Sent a New Offer'
+      : status === 'locked'
+        ? 'Company Locked the Deal'
+      : status === 'order_placed'
+        ? 'Company Placed an Order'
+      : status === 'completed'
+        ? 'Deal Payment Completed'
+        : 'Company Cancelled the Deal';
+    const message = status === 'negotiating'
+      ? `${deal.companyName} updated offer terms for listing ${deal.listingId}.`
+      : status === 'locked'
+        ? `${deal.companyName} locked deal terms for listing ${deal.listingId}.`
+      : status === 'order_placed'
+        ? `${deal.companyName} placed the order for listing ${deal.listingId}. Please accept or reject it.`
+      : status === 'completed'
+        ? `${deal.companyName} completed the payment flow for listing ${deal.listingId}.`
+        : `${deal.companyName} cancelled the deal for listing ${deal.listingId}.`;
+
+    addNotification({
+      id: `notif_${Date.now()}_company_${index}`,
+      userId: recipientId,
+      type: 'crop_deal',
+      title,
+      message,
+      channel: ['push', 'sms'],
+      isRead: false,
+      createdAt,
+    });
+  });
+};
+
 const readOrdersStore = (): Order[] => {
-  if (!canUseStorage()) return ordersStore;
+  if (!canUseStorage()) return ordersStore.map(normalizeOrderSettlement);
 
   const saved = window.localStorage.getItem(ORDERS_STORAGE_KEY);
-  if (!saved) return ordersStore;
+  if (!saved) return ordersStore.map(normalizeOrderSettlement);
 
   try {
     const parsed = JSON.parse(saved) as Order[];
     if (Array.isArray(parsed) && parsed.length > 0) {
-      ordersStore = parsed;
+      ordersStore = parsed.map(normalizeOrderSettlement);
     }
   } catch (error) {
     console.error('[MOCK] Failed to read orders store', error);
   }
 
-  return ordersStore;
+  return ordersStore.map(normalizeOrderSettlement);
 };
 
 const writeOrdersStore = (orders: Order[]) => {
-  ordersStore = orders;
+  ordersStore = orders.map(normalizeOrderSettlement);
   if (canUseStorage()) {
     window.localStorage.setItem(ORDERS_STORAGE_KEY, JSON.stringify(ordersStore));
   }
@@ -874,15 +1149,91 @@ const setCurrentFarmerId = (farmerId: string) => {
 const setCurrentRoleUserId = (userId: string) => {
   if (canUseStorage()) {
     window.localStorage.setItem(CURRENT_ROLE_USER_STORAGE_KEY, userId);
+    const userRole = readRoleUsersStore().find((user) => user.id === userId)?.role;
+    if (userRole) {
+      const roleSessions = readJsonRecord<string>(CURRENT_ROLE_USER_IDS_BY_ROLE_STORAGE_KEY);
+      roleSessions[userRole] = userId;
+      writeJsonRecord(CURRENT_ROLE_USER_IDS_BY_ROLE_STORAGE_KEY, roleSessions);
+    }
   }
   notifyUserSessionUpdated();
 };
 
-const clearCurrentSession = () => {
+const clearCurrentSession = (role?: ManagedUserRole) => {
   if (!canUseStorage()) return;
-  window.localStorage.removeItem(CURRENT_ROLE_USER_STORAGE_KEY);
-  window.localStorage.removeItem(CURRENT_FARMER_STORAGE_KEY);
+  if (!role) {
+    window.localStorage.removeItem(CURRENT_ROLE_USER_STORAGE_KEY);
+    window.localStorage.removeItem(CURRENT_FARMER_STORAGE_KEY);
+    window.localStorage.removeItem(CURRENT_ROLE_USER_IDS_BY_ROLE_STORAGE_KEY);
+    notifyUserSessionUpdated();
+    return;
+  }
+
+  const roleSessions = readJsonRecord<string>(CURRENT_ROLE_USER_IDS_BY_ROLE_STORAGE_KEY);
+  const roleUserId = roleSessions[role];
+  if (roleUserId) {
+    delete roleSessions[role];
+    writeJsonRecord(CURRENT_ROLE_USER_IDS_BY_ROLE_STORAGE_KEY, roleSessions);
+  }
+
+  if (role === 'farmer') {
+    window.localStorage.removeItem(CURRENT_FARMER_STORAGE_KEY);
+  }
+
+  const currentUserId = window.localStorage.getItem(CURRENT_ROLE_USER_STORAGE_KEY);
+  if (currentUserId) {
+    const currentUserRole = readRoleUsersStore().find((user) => user.id === currentUserId)?.role;
+    if (currentUserRole === role) {
+      window.localStorage.removeItem(CURRENT_ROLE_USER_STORAGE_KEY);
+    }
+  }
+
   notifyUserSessionUpdated();
+};
+
+const removeUserAssociatedMockData = (user: DashboardRoleUser) => {
+  writeNotificationsStore(readNotificationsStore().filter((item) => item.userId !== user.id));
+
+  const settingsStore = readUserSettingsStore();
+  if (settingsStore[user.id]) {
+    delete settingsStore[user.id];
+    writeUserSettingsStore(settingsStore);
+  }
+
+  if (user.role === 'farmer') {
+    writeAdvisoryCasesStore(readAdvisoryCasesStore().filter((item) => item.farmerId !== user.id));
+    writeOrdersStore(readOrdersStore().filter((item) => item.farmerId !== user.id));
+    writeCropListingsStore(readCropListingsStore().filter((item) => item.farmerId !== user.id));
+    writeCropDealsStore(readCropDealsStore().filter((item) => item.farmerId !== user.id));
+    if (canUseStorage()) {
+      window.localStorage.removeItem(getCartStorageKey(user.id));
+    }
+  }
+
+  if (user.role === 'officer') {
+    writeAdvisoryCasesStore(readAdvisoryCasesStore().map((item) => (
+      item.officerId === user.id
+        ? { ...item, officerId: undefined, officerName: undefined }
+        : item
+    )));
+  }
+
+  if (user.role === 'vendor') {
+    writeProductsStore(readProductsStore().filter((item) => item.vendorId !== user.id));
+    writeOrdersStore(readOrdersStore().filter((item) => item.vendorId !== user.id));
+  }
+
+  if (user.role === 'company') {
+    writeCropDealsStore(readCropDealsStore().filter((item) => item.companyId !== user.id));
+  }
+
+  writeTenantsStore(readTenantsStore().map((tenant) => (
+    tenant.adminUserId === user.id
+      ? { ...tenant, adminUserId: '' }
+      : tenant
+  )));
+
+  writeRoleUsersStore(readRoleUsersStore().filter((item) => item.id !== user.id));
 };
 
 const getCurrentFarmer = (): Farmer | undefined => {
@@ -903,10 +1254,21 @@ const getCurrentFarmer = (): Farmer | undefined => {
   return undefined;
 };
 
-const getCurrentRoleUser = (): DashboardRoleUser | undefined => {
+const getCurrentRoleUser = (role?: ManagedUserRole): DashboardRoleUser | undefined => {
   const users = readRoleUsersStore();
 
   if (canUseStorage()) {
+    if (role) {
+      const roleSessions = readJsonRecord<string>(CURRENT_ROLE_USER_IDS_BY_ROLE_STORAGE_KEY);
+      const roleUserId = roleSessions[role];
+      if (roleUserId) {
+        const roleUser = users.find((user) => user.id === roleUserId);
+        if (roleUser?.role === role) {
+          return roleUser;
+        }
+      }
+    }
+
     const currentUserId = window.localStorage.getItem(CURRENT_ROLE_USER_STORAGE_KEY);
     if (currentUserId) {
       return users.find((user) => user.id === currentUserId);
@@ -1109,8 +1471,8 @@ export const authService = {
     return getCurrentFarmer();
   },
 
-  getCurrentUser(): DashboardRoleUser | undefined {
-    return getCurrentRoleUser();
+  getCurrentUser(role?: ManagedUserRole): DashboardRoleUser | undefined {
+    return getCurrentRoleUser(role);
   },
 
   async adminLogin(
@@ -1118,6 +1480,7 @@ export const authService = {
     password: string,
   role?: ManagedUserRole,
   ): Promise<{ success: boolean; role?: string; token?: string; requiresOtp?: boolean; otpToken?: string; message?: string }> {
+    let apiError: unknown;
     try {
       const result = await apiRequest<{ success: boolean; role?: string; token?: string; user?: DashboardRoleUser; message?: string }>(
         '/auth/login',
@@ -1129,10 +1492,8 @@ export const authService = {
       }
       return result;
     } catch (error) {
-      if (!shouldFallbackToMock(error)) {
-        return { success: false, message: error instanceof Error ? error.message : 'Login failed.' };
-      }
-      console.warn('[API] Falling back to local mock for /auth/login:', error);
+      apiError = error;
+      console.warn('[API] Login API failed, trying local/mock fallback for /auth/login:', error);
     }
 
     await delay(700);
@@ -1150,7 +1511,12 @@ export const authService = {
       }
       return { success: true, role: matchedUser.role, token: `mock_jwt_${matchedUser.role}` };
     }
-    return { success: false };
+
+    if (apiError && !shouldFallbackToMock(apiError)) {
+      return { success: false, message: apiError instanceof Error ? apiError.message : 'Login failed.' };
+    }
+
+    return { success: false, message: 'Invalid credentials.' };
   },
 
   async registerRoleUser(
@@ -1268,12 +1634,48 @@ export const authService = {
     return { success: true };
   },
 
+  async deleteAccount(userId: string): Promise<{ success: boolean; message?: string }> {
+    const localUser = readRoleUsersStore().find((item) => item.id === userId);
+    const isDeletingCurrentSession = localUser
+      ? getCurrentRoleUser(localUser.role)?.id === userId
+      : getCurrentRoleUser()?.id === userId;
+
+    try {
+      const result = await apiRequest<{ success: boolean }>(`/users/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+      if (result.success && localUser) {
+        removeUserAssociatedMockData(localUser);
+      }
+      if (result.success && isDeletingCurrentSession) {
+        clearCurrentSession();
+      }
+      return result;
+    } catch (error) {
+      if (!shouldFallbackToMock(error)) {
+        return { success: false, message: error instanceof Error ? error.message : 'Account deletion failed.' };
+      }
+      console.warn('[API] Falling back to local mock for account deletion:', error);
+    }
+
+    await delay(300);
+    const user = readRoleUsersStore().find((item) => item.id === userId);
+    if (!user) {
+      return { success: false, message: 'User not found.' };
+    }
+
+    removeUserAssociatedMockData(user);
+    if (isDeletingCurrentSession) {
+      clearCurrentSession();
+    }
+
+    return { success: true };
+  },
+
   resetDemoData() {
     roleUsersStore = [...DEFAULT_ROLE_USERS];
     advisoryCasesStore = [];
     notificationsStore = [...MOCK_NOTIFICATIONS];
     farmersStore = [...MOCK_FARMERS];
-    ordersStore = [...MOCK_ORDERS];
+    ordersStore = [...MOCK_ORDERS].map(normalizeOrderSettlement);
 
     if (canUseStorage()) {
       window.localStorage.setItem(ROLE_USERS_STORAGE_KEY, JSON.stringify(roleUsersStore));
@@ -1283,6 +1685,7 @@ export const authService = {
       window.localStorage.setItem(ORDERS_STORAGE_KEY, JSON.stringify(ordersStore));
       window.localStorage.removeItem(USER_SETTINGS_STORAGE_KEY);
       window.localStorage.removeItem(MOCK_OTP_SESSION_STORAGE_KEY);
+      window.localStorage.removeItem(CURRENT_ROLE_USER_IDS_BY_ROLE_STORAGE_KEY);
       farmersStore.forEach((farmer) => window.localStorage.removeItem(getCartStorageKey(farmer.id)));
     }
 
@@ -1295,8 +1698,9 @@ export const authService = {
     return { success: result.success, role: result.role as ManagedUserRole | undefined };
   },
 
-  logout() {
-    clearCurrentSession();
+  logout(role?: ManagedUserRole) {
+    clearMockOtpSession();
+    clearCurrentSession(role);
   },
 };
 
@@ -1367,18 +1771,41 @@ export const farmerService = {
 // ADVISORY SERVICES
 // ============================================================
 export const advisoryService = {
-  async getAdvisoryCases(farmerId?: string): Promise<AdvisoryCase[]> {
+  async getAdvisoryCases(
+    filters?: string | Partial<{ farmerId: string; officerId: string; q: string; status: AdvisoryCase['status'] }>,
+  ): Promise<AdvisoryCase[]> {
+    const options = typeof filters === 'string' ? { farmerId: filters } : (filters || {});
+    const params = new URLSearchParams();
+    if (options.farmerId) params.set('farmerId', options.farmerId);
+    if (options.officerId) params.set('officerId', options.officerId);
+    if (options.q) params.set('q', options.q);
+    if (options.status) params.set('status', options.status);
+    const query = params.toString();
+    const path = `/advisory-cases${query ? `?${query}` : ''}`;
+
     try {
-      const cases = await apiRequest<AdvisoryCase[]>(`/advisory-cases${farmerId ? `?farmerId=${encodeURIComponent(farmerId)}` : ''}`);
+      const cases = await apiRequest<AdvisoryCase[]>(path);
       mergeAdvisoryCases(cases);
-      return farmerId ? cases.filter((item) => item.farmerId === farmerId) : cases;
+      return cases;
     } catch (error) {
-      console.warn(`[API] Falling back to local mock for /advisory-cases${farmerId ? `?farmerId=${encodeURIComponent(farmerId)}` : ''}:`, error);
+      console.warn(`[API] Falling back to local mock for ${path}:`, error);
     }
 
     await delay();
-    const cases = readAdvisoryCasesStore();
-    if (farmerId) return cases.filter((c) => c.farmerId === farmerId);
+    let cases = readAdvisoryCasesStore();
+    if (options.farmerId) cases = cases.filter((c) => c.farmerId === options.farmerId);
+    if (options.officerId) cases = cases.filter((c) => c.officerId === options.officerId);
+    if (options.status) cases = cases.filter((c) => c.status === options.status);
+    if (options.q) {
+      const needle = options.q.toLowerCase();
+      cases = cases.filter((c) => (
+        c.id.toLowerCase().includes(needle)
+        || c.cropType.toLowerCase().includes(needle)
+        || c.description.toLowerCase().includes(needle)
+        || c.farmerName.toLowerCase().includes(needle)
+      ));
+    }
+
     return cases;
   },
 
@@ -1543,10 +1970,8 @@ export const advisoryService = {
   },
 
   async getOfficerCases(officerId: string): Promise<AdvisoryCase[]> {
-    return apiOrMock('/advisory-cases', async () => {
-    await delay();
-    return readAdvisoryCasesStore().filter((c) => c.officerId === officerId || c.status === 'pending' || c.status === 'assigned' || c.status === 'ai_analyzed');
-    }).then((cases) => cases.filter((c) => c.officerId === officerId || c.status === 'pending' || c.status === 'assigned' || c.status === 'ai_analyzed'));
+    const cases = await this.getAdvisoryCases();
+    return cases.filter((c) => c.officerId === officerId || c.status === 'pending' || c.status === 'assigned' || c.status === 'ai_analyzed');
   },
 
   async getRegionalStats(): Promise<Array<{ division: string; district: string; total_cases: number; pending_cases: number; responded_cases: number; resolved_cases: number }>> {
@@ -1611,7 +2036,9 @@ export const productService = {
   },
 
   async getPublicProducts(category?: string): Promise<Product[]> {
-    return apiOrMock(`/products${category ? `?category=${encodeURIComponent(category)}` : ''}`, async () => {
+    const params = new URLSearchParams({ includeCropListings: '1' });
+    if (category) params.set('category', category);
+    return apiOrMock(`/products?${params.toString()}`, async () => {
     await delay();
     let products = readMarketplaceProducts();
     if (category) products = products.filter((p) => p.category === category);
@@ -1715,13 +2142,17 @@ export const productService = {
 // ORDER SERVICES
 // ============================================================
 export const orderService = {
-  async getOrders(farmerId?: string): Promise<Order[]> {
-    return apiOrMock(`/orders${farmerId ? `?farmerId=${encodeURIComponent(farmerId)}` : ''}`, async () => {
+  async getOrders(farmerId?: string, vendorId?: string): Promise<Order[]> {
+    const params = new URLSearchParams();
+    if (farmerId) params.set('farmerId', farmerId);
+    if (vendorId) params.set('vendorId', vendorId);
+    return apiOrMock(`/orders${params.toString() ? `?${params.toString()}` : ''}`, async () => {
     await delay();
-    const orders = readOrdersStore();
-    if (farmerId) return orders.filter((o) => o.farmerId === farmerId);
-    return orders;
-    });
+    let orders = readOrdersStore();
+    if (farmerId) orders = orders.filter((o) => o.farmerId === farmerId);
+    if (vendorId) orders = orders.filter((o) => o.vendorId === vendorId);
+    return orders.map(normalizeOrderSettlement);
+    }).then((orders) => orders.map(normalizeOrderSettlement));
   },
 
   async getOrderById(id: string): Promise<Order | undefined> {
@@ -1739,84 +2170,29 @@ export const orderService = {
     try {
       return await apiRequest<{ success: boolean; orderId?: string; message?: string }>('/orders', jsonBody(data));
     } catch (error) {
-      console.warn('[API] Falling back to local mock for order placement:', error);
-    }
-
-    await delay(1500);
-    if (data.items.length === 0) {
-      return { success: false, message: 'Cart is empty.' };
-    }
-
-    const farmer = readFarmersStore().find((item) => item.id === data.farmerId);
-    const products = data.items
-      .map((item) => {
-        const product = readProductsStore().find((productItem) => productItem.id === item.productId);
-        return product ? { item, product } : null;
-      })
-      .filter(Boolean) as { item: { productId: string; quantity: number }; product: Product }[];
-
-    if (products.length !== data.items.length) {
-      return { success: false, message: 'Some cart items are unavailable.' };
-    }
-
-    const vendorId = products[0].product.vendorId;
-    const vendorName = products[0].product.vendorName;
-    const mixedVendor = products.some(({ product }) => product.vendorId !== vendorId);
-    if (mixedVendor) {
-      return { success: false, message: 'Please checkout products from one vendor at a time.' };
-    }
-
-    const year = new Date().getFullYear();
-    const orderId = `ORD-${year}-${String(Math.floor(Math.random() * 99999999)).padStart(8, '0')}`;
-    const totalAmount = products.reduce((sum, { item, product }) => sum + (product.price * item.quantity), 0);
-    const estimatedDays = Math.max(...products.map(({ product }) => product.estimatedDeliveryDays));
-    const estimatedDeliveryDate = new Date();
-    estimatedDeliveryDate.setDate(estimatedDeliveryDate.getDate() + estimatedDays);
-
-    const newOrder: Order = {
-      id: orderId,
-      farmerId: data.farmerId,
-      farmerName: farmer?.name ?? 'Farmer',
-      vendorId,
-      vendorName,
-      items: products.map(({ item, product }) => ({
-        productId: product.id,
-        productName: product.nameEn,
-        quantity: item.quantity,
-        price: product.price,
-        unit: product.unit,
-      })),
-      totalAmount,
-      status: 'pending',
-      paymentGateway: data.paymentGateway,
-      paymentStatus: data.paymentGateway === 'cod' ? 'pending' : 'paid',
-      placedAt: new Date().toISOString(),
-      estimatedDelivery: estimatedDeliveryDate.toISOString().slice(0, 10),
-    };
-
-    writeOrdersStore([newOrder, ...readOrdersStore()]);
-    writeProductsStore(readProductsStore().map((product) => {
-      const purchasedItem = products.find(({ product: itemProduct }) => itemProduct.id === product.id);
-      if (!purchasedItem) return product;
       return {
-        ...product,
-        stockQty: Math.max(product.stockQty - purchasedItem.item.quantity, 0),
+        success: false,
+        message: error instanceof Error ? error.message : 'Order placement failed.',
       };
-    }));
-    writeCartStore(data.farmerId, []);
+    }
+  },
 
-    addNotification({
-      id: `notif_${Date.now()}`,
-      userId: data.farmerId,
-      type: 'order',
-      title: 'Order Placed Successfully',
-      message: `Order ${orderId} has been placed via ${data.paymentGateway.toUpperCase()}. Estimated delivery: ${newOrder.estimatedDelivery}.`,
-      channel: ['push', 'sms'],
-      isRead: false,
-      createdAt: new Date().toISOString(),
-    });
-
-    return { success: true, orderId };
+  async initiateOrderStripePayment(data: {
+    orderId: string;
+    farmerId: string;
+  }): Promise<{ success: boolean; gatewayPageUrl?: string; alreadyPaid?: boolean; message?: string }> {
+    try {
+      return await apiRequest<{ success: boolean; gatewayPageUrl?: string; alreadyPaid?: boolean; message?: string }>(
+        '/payments/orders/stripe/initiate',
+        jsonBody(data),
+      );
+    } catch (error) {
+      console.warn('[API] Stripe order payment initiation failed:', error);
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Failed to start Stripe sandbox payment.',
+      };
+    }
   },
 
   async updateOrderStatus(orderId: string, status: Order['status']): Promise<{ success: boolean }> {
@@ -1829,11 +2205,27 @@ export const orderService = {
     await delay(500);
     const orders = readOrdersStore().map((order) => (
       order.id === orderId
-        ? {
-          ...order,
-          status,
-          deliveredAt: status === 'delivered' ? new Date().toISOString() : order.deliveredAt,
-        }
+        ? (() => {
+          const nextPaymentStatus: Order['paymentStatus'] = (
+            order.paymentGateway === 'cod' && (status === 'delivered' || status === 'completed')
+              ? 'paid'
+              : order.paymentStatus
+          );
+          const nextSettlementStatus: NonNullable<Order['settlementStatus']> = (
+            order.settlementStatus === 'released'
+              ? 'released'
+              : (status === 'delivered' || status === 'completed') && nextPaymentStatus === 'paid'
+                ? 'ready_for_release'
+                : 'held'
+          );
+          return {
+            ...order,
+            status,
+            paymentStatus: nextPaymentStatus,
+            settlementStatus: nextSettlementStatus,
+            deliveredAt: status === 'delivered' ? new Date().toISOString() : order.deliveredAt,
+          };
+        })()
         : order
     ));
     writeOrdersStore(orders);
@@ -1953,13 +2345,113 @@ export const userSettingsService = {
 // CROP LISTING SERVICES
 // ============================================================
 export const cropService = {
+  ensureFarmerDealsFromNotifications(
+    farmerId: string,
+    notifications: Notification[],
+  ): CropDeal[] {
+    const farmerUser = resolveFarmerUser(farmerId);
+    const allListings = readCropListingsStore();
+    const relevantNotificationListingIds = new Set(
+      notifications
+        .filter(isNewMatchRequestNotification)
+        .map((notification) => extractListingIdFromNotification(notification.message))
+        .filter(Boolean) as string[],
+    );
+
+    const ownListings = allListings.filter((listing) => (
+      listing.farmerId === farmerId
+      || (farmerUser?.name && listing.farmerName === farmerUser.name)
+      || relevantNotificationListingIds.has(listing.id)
+    ));
+    const ownListingMap = new Map(ownListings.map((listing) => [listing.id, listing]));
+    const existingDeals = readCropDealsStore();
+    const nextDeals = [...existingDeals];
+
+    notifications
+      .filter(isNewMatchRequestNotification)
+      .forEach((notification, index) => {
+        const listingId = extractListingIdFromNotification(notification.message);
+        if (!listingId) return;
+
+        const listing = ownListingMap.get(listingId) || allListings.find((item) => item.id === listingId);
+        const fallbackCropType = extractCropTypeFromInterestMessage(notification.message);
+        const fallbackFarmerName = farmerUser?.name || listing?.farmerName || 'Farmer';
+
+        const alreadyExists = nextDeals.some((deal) => (
+          deal.listingId === listingId
+          && extractCompanyNameFromInterestMessage(notification.message).toLowerCase() === deal.companyName.toLowerCase()
+          && ['pending', 'negotiating', 'confirmed', 'locked', 'order_placed', 'accepted', 'delivered', 'completed'].includes(deal.status)
+        ));
+        if (alreadyExists) return;
+
+        const companyName = extractCompanyNameFromInterestMessage(notification.message);
+        const companyUser = resolveCompanyUser(undefined, companyName);
+        const quantityKg = Math.max(1, listing?.quantityKg ?? 1);
+        const agreedPrice = Math.max(1, listing?.askingPrice ?? 1);
+
+        nextDeals.unshift({
+          id: `synced_${listingId}_${index}`,
+          listingId,
+          companyId: companyUser?.id || `company_${index}`,
+          companyName,
+          farmerId,
+          farmerName: fallbackFarmerName,
+          agreedPrice,
+          quantityKg,
+          commissionPct: 3,
+          commissionAmt: Math.round(agreedPrice * quantityKg * 0.03),
+          status: 'pending',
+          confirmedAt: notification.createdAt,
+          paymentStatus: 'pending',
+          paymentGateway: 'bkash',
+        });
+
+        if (listing) {
+          ownListingMap.set(listing.id, listing);
+        } else {
+          ownListingMap.set(listingId, {
+            id: listingId,
+            farmerId,
+            farmerName: fallbackFarmerName,
+            farmerDistrict: farmerUser?.district || '',
+            cropType: fallbackCropType,
+            variety: '',
+            quantityKg,
+            qualityGrade: 'B',
+            askingPrice: agreedPrice,
+            harvestDate: new Date().toISOString().slice(0, 10),
+            district: farmerUser?.district || '',
+            upazila: farmerUser?.upazila || '',
+            photos: [],
+            status: 'matched',
+            createdAt: notification.createdAt,
+            matchedCompanyId: companyUser?.id,
+          });
+        }
+      });
+
+    writeCropDealsStore(dedupeCropDeals(nextDeals));
+    return nextDeals.filter((deal) => (
+      deal.farmerId === farmerId
+      || (farmerUser?.name && deal.farmerName === farmerUser.name)
+      || ownListingMap.has(deal.listingId)
+      || relevantNotificationListingIds.has(deal.listingId)
+    ));
+  },
+
   async getCropListings(farmerId?: string): Promise<CropListing[]> {
-    return apiOrMock(`/crop-listings${farmerId ? `?farmerId=${encodeURIComponent(farmerId)}` : ''}`, async () => {
-    await delay();
-    const listings = readCropListingsStore();
-    if (farmerId) return listings.filter((l) => l.farmerId === farmerId);
-    return listings;
+    const listings = await apiOrMock(`/crop-listings${farmerId ? `?farmerId=${encodeURIComponent(farmerId)}` : ''}`, async () => {
+      await delay();
+      return readCropListingsStore();
     });
+
+    if (farmerId) {
+      return listings.filter((listing) => listing.farmerId === farmerId);
+    }
+
+    return listings
+      .filter((listing) => Boolean(listing.farmerId?.trim()) && !DEMO_CROP_LISTING_IDS.has(listing.id))
+      .map((listing) => ({ ...listing }));
   },
 
   async createCropListing(data: Partial<CropListing>): Promise<{ success: boolean; listingId?: string }> {
@@ -1994,6 +2486,38 @@ export const cropService = {
     return { success: true, listingId };
   },
 
+  async updateCropListing(listingId: string, data: Partial<CropListing>): Promise<{ success: boolean }> {
+    try {
+      return await apiRequest<{ success: boolean }>(`/crop-listings/${encodeURIComponent(listingId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      });
+    } catch (error) {
+      console.warn('[API] Falling back to local mock for crop listing update:', error);
+    }
+
+    await delay(400);
+    const updated = readCropListingsStore().map((listing) => (
+      listing.id === listingId
+        ? { ...listing, ...data, id: listing.id }
+        : listing
+    ));
+    writeCropListingsStore(updated);
+    return { success: true };
+  },
+
+  async deleteCropListing(listingId: string): Promise<{ success: boolean }> {
+    try {
+      return await apiRequest<{ success: boolean }>(`/crop-listings/${encodeURIComponent(listingId)}`, { method: 'DELETE' });
+    } catch (error) {
+      console.warn('[API] Falling back to local mock for crop listing delete:', error);
+    }
+
+    await delay(300);
+    writeCropListingsStore(readCropListingsStore().filter((listing) => listing.id !== listingId));
+    return { success: true };
+  },
+
   async searchCropListings(filters: {
     cropType?: string;
     district?: string;
@@ -2021,78 +2545,415 @@ export const cropService = {
     listingId: string;
     companyId: string;
     companyName: string;
+    quantityKg?: number;
+    paymentGateway?: PaymentGateway;
+    listing?: CropListing;
+    allowRepeat?: boolean;
   }): Promise<{ success: boolean; matchId?: string; message?: string }> {
+    const localListing = readCropListingsStore().find((item) => item.id === data.listingId) || data.listing;
+    const companyUser = resolveCompanyUser(data.companyId, data.companyName);
+    const normalizedCompanyId = companyUser?.id || data.companyId;
+    const allowRepeat = Boolean(data.allowRepeat);
+
+    const applyLocalInterestSync = (
+      matchId: string,
+      listing: CropListing,
+      options?: { preserveExistingStatus?: boolean },
+    ) => {
+      const farmerUserId = resolveFarmerUser(listing.farmerId, listing.farmerName)?.id || listing.farmerId;
+      const quantityKg = Math.max(1, Math.min(data.quantityKg || listing.quantityKg, listing.quantityKg));
+      const existingDeal = readCropDealsStore().find((deal) => (
+        (deal.id === matchId || (deal.listingId === listing.id && deal.companyId === normalizedCompanyId))
+        && deal.status !== 'cancelled'
+      ));
+      const preserveExistingStatus = Boolean(options?.preserveExistingStatus && existingDeal);
+      const nextDeal: CropDeal = {
+        id: existingDeal?.id || matchId,
+        listingId: listing.id,
+        companyId: normalizedCompanyId,
+        companyName: companyUser?.companyName || data.companyName,
+        farmerId: farmerUserId,
+        farmerName: listing.farmerName,
+        agreedPrice: preserveExistingStatus ? existingDeal!.agreedPrice : listing.askingPrice,
+        quantityKg: preserveExistingStatus ? existingDeal!.quantityKg : quantityKg,
+        commissionPct: 3,
+        commissionAmt: preserveExistingStatus
+          ? existingDeal!.commissionAmt
+          : Math.round(listing.askingPrice * quantityKg * 0.03),
+        status: preserveExistingStatus ? existingDeal!.status : 'confirmed',
+        paymentGateway: preserveExistingStatus ? existingDeal!.paymentGateway : data.paymentGateway,
+        paymentStatus: preserveExistingStatus ? existingDeal!.paymentStatus : 'pending',
+        confirmedAt: preserveExistingStatus ? existingDeal!.confirmedAt : new Date().toISOString(),
+      };
+
+      if (allowRepeat) {
+        writeCropDealsStore([nextDeal, ...readCropDealsStore()]);
+      } else {
+        upsertLocalCropDeal(nextDeal);
+      }
+
+      writeCropListingsStore(readCropListingsStore().map((item) => (
+        item.id === listing.id ? { ...item, status: 'matched', matchedCompanyId: normalizedCompanyId } : item
+      )));
+
+      // Cart add flow: farmer should be notified only when company places order.
+    };
+
     try {
-      return await apiRequest<{ success: boolean; matchId?: string; message?: string }>('/crop-deals/interest', jsonBody(data));
+      const result = await apiRequest<{ success: boolean; matchId?: string; message?: string }>('/crop-deals/interest', jsonBody(data));
+      if (!result.success) {
+        // Backend returned a logical failure (often listing-id mismatch between API and local state).
+        // Continue into robust local fallback so the user flow does not break.
+        throw new Error(result.message || 'Could not send interest from backend.');
+      }
+
+      if (localListing) {
+        const preserveExistingStatus = (result.message || '').toLowerCase().includes('already sent');
+        applyLocalInterestSync(
+          result.matchId || `deal_${String(Date.now()).slice(-6)}`,
+          localListing,
+          { preserveExistingStatus },
+        );
+      }
+      emitNotificationsUpdated();
+      return result;
     } catch (error) {
-      console.warn('[API] Falling back to local mock for crop interest:', error);
+      console.warn('[API] Falling back to local/mock flow for crop interest:', error);
     }
 
     await delay(500);
-    const listing = readCropListingsStore().find((item) => item.id === data.listingId);
+    const listing = localListing;
     if (!listing) return { success: false, message: 'Listing not found.' };
 
-    const existing = readCropDealsStore().find((deal) => deal.listingId === data.listingId && deal.companyId === data.companyId);
-    if (existing) return { success: true, matchId: existing.id, message: 'Interest already sent.' };
+    if (!allowRepeat) {
+      const existing = readCropDealsStore().find((deal) => (
+        deal.listingId === data.listingId
+        && deal.companyId === normalizedCompanyId
+        && deal.status !== 'cancelled'
+      ));
+      if (existing) return { success: true, matchId: existing.id, message: 'Interest already sent.' };
+    }
 
-    const matchId = `deal_${String(Date.now()).slice(-6)}`;
-    const nextDeal: CropDeal = {
-      id: matchId,
-      listingId: listing.id,
-      companyId: data.companyId,
-      companyName: data.companyName,
-      farmerId: listing.farmerId,
-      farmerName: listing.farmerName,
-      agreedPrice: listing.askingPrice,
-      quantityKg: listing.quantityKg,
-      commissionPct: 3,
-      commissionAmt: Math.round(listing.askingPrice * listing.quantityKg * 0.03),
-      status: 'pending',
-    };
-
-    writeCropDealsStore([nextDeal, ...readCropDealsStore()]);
-    writeCropListingsStore(readCropListingsStore().map((item) => (
-      item.id === listing.id ? { ...item, status: 'matched', matchedCompanyId: data.companyId } : item
-    )));
-
-    addNotification({
-      id: `notif_${Date.now()}`,
-      userId: data.companyId,
-      type: 'system',
-      title: 'Interest Sent',
-      message: `Interest sent for ${listing.cropType} listing ${listing.id}. Farmer connection is now in deal stage.`,
-      channel: ['push', 'email'],
-      isRead: false,
-      createdAt: new Date().toISOString(),
-    });
+    const matchId = allowRepeat ? `deal_${String(Date.now())}_${Math.floor(Math.random() * 1000)}` : `deal_${String(Date.now()).slice(-6)}`;
+    applyLocalInterestSync(matchId, listing);
 
     return { success: true, matchId };
   },
 
-  async getCompanyMatches(companyId: string): Promise<CropDeal[]> {
-    return apiOrMock(`/crop-deals?companyId=${encodeURIComponent(companyId)}`, async () => {
-    await delay(300);
-    return readCropDealsStore().filter((deal) => deal.companyId === companyId);
-    });
+  async initiateDealPayment(data: {
+    dealId: string;
+    companyId: string;
+    listingId?: string;
+    paymentGateway?: PaymentGateway;
+  }): Promise<{ success: boolean; gatewayPageUrl?: string; alreadyPaid?: boolean; message?: string }> {
+    const endpoint = data.paymentGateway === 'stripe'
+      ? '/payments/stripe/initiate'
+      : '/payments/sslcommerz/initiate';
+    try {
+      return await apiRequest<{ success: boolean; gatewayPageUrl?: string; alreadyPaid?: boolean; message?: string }>(
+        endpoint,
+        jsonBody(data),
+      );
+    } catch (error) {
+      console.warn('[API] Payment initiation failed:', error);
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Failed to start sandbox payment. Please try again.',
+      };
+    }
   },
 
-  async updateDealStatus(dealId: string, status: CropDeal['status']): Promise<{ success: boolean }> {
-    try {
-      return await apiRequest<{ success: boolean }>(`/crop-deals/${encodeURIComponent(dealId)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
-    } catch (error) {
-      console.warn('[API] Falling back to local mock for deal status:', error);
+  async getCompanyMatches(companyId: string): Promise<CropDeal[]> {
+    const companyUser = resolveCompanyUser(companyId);
+    const candidateCompanyIds = new Set([companyId, companyUser?.id, companyUser?.companyId].filter(Boolean) as string[]);
+
+    if (API_V1) {
+      try {
+        const apiDeals = await apiRequest<CropDeal[]>(`/crop-deals?companyId=${encodeURIComponent(companyId)}`);
+        const localDeals = readCropDealsStore().filter((deal) => (
+          candidateCompanyIds.has(deal.companyId)
+          || (companyUser?.companyName && deal.companyName === companyUser.companyName)
+          || (companyUser?.name && deal.companyName === companyUser.name)
+        ));
+        return dedupeCropDeals([...apiDeals, ...localDeals]).sort((a, b) => (
+          new Date(b.confirmedAt || 0).getTime() - new Date(a.confirmedAt || 0).getTime()
+        ));
+      } catch (error) {
+        console.warn('[API] Falling back to local/mock flow for company deals:', error);
+      }
     }
 
     await delay(300);
+    return readCropDealsStore().filter((deal) => (
+      candidateCompanyIds.has(deal.companyId)
+      || (companyUser?.companyName && deal.companyName === companyUser.companyName)
+      || (companyUser?.name && deal.companyName === companyUser.name)
+    ));
+  },
+
+  async getFarmerDeals(farmerId: string): Promise<CropDeal[]> {
+    const farmerUser = resolveFarmerUser(farmerId);
+    const relevantListingIds = new Set<string>();
+
+    const collectRelevantDeals = (deals: CropDeal[], listings: CropListing[] = readCropListingsStore()): CropDeal[] => {
+      const ownListings = listings.filter((listing) => (
+        listing.farmerId === farmerId
+        || (farmerUser?.name && listing.farmerName === farmerUser.name)
+        || relevantListingIds.has(listing.id)
+      ));
+      const ownListingIds = new Set(ownListings.map((listing) => listing.id));
+      const candidateIds = new Set<string>([
+        farmerId,
+        farmerUser?.id,
+        ...ownListings.map((listing) => listing.farmerId),
+      ].filter(Boolean) as string[]);
+
+      return deals.filter((deal) => (
+        candidateIds.has(deal.farmerId)
+        || ownListingIds.has(deal.listingId)
+        || relevantListingIds.has(deal.listingId)
+        || (farmerUser?.name && deal.farmerName === farmerUser.name)
+      ));
+    };
+
+    if (API_V1) {
+      try {
+        const scopedDeals = await apiRequest<CropDeal[]>(`/crop-deals?farmerId=${encodeURIComponent(farmerId)}`);
+        const localDeals = collectRelevantDeals(readCropDealsStore());
+        return dedupeCropDeals([...scopedDeals, ...localDeals]).sort((a, b) => (
+          new Date(b.confirmedAt || 0).getTime() - new Date(a.confirmedAt || 0).getTime()
+        ));
+      } catch (error) {
+        console.warn(`[API] Falling back to local/mock flow for farmer deals for ${farmerId}:`, error);
+      }
+    }
+    await delay(300);
+    const localDeals = collectRelevantDeals(readCropDealsStore());
+    const mergedById = new Map<string, CropDeal>();
+    [...localDeals].forEach((deal) => mergedById.set(deal.id, deal));
+    return dedupeCropDeals(Array.from(mergedById.values()));
+  },
+
+  async updateDealStatus(
+    dealId: string,
+    status: CropDeal['status'],
+    options?: {
+      actorRole?: 'farmer' | 'company';
+      actorId?: string;
+      agreedPrice?: number;
+      quantityKg?: number;
+      paymentGateway?: PaymentGateway;
+      paymentStatus?: 'paid' | 'pending' | 'failed';
+      dealContext?: Pick<CropDeal, 'companyId' | 'companyName' | 'farmerId' | 'farmerName' | 'listingId'>;
+    },
+  ): Promise<{ success: boolean; message?: string }> {
+    const localDeals = readCropDealsStore();
+    const targetDeal = localDeals.find((deal) => deal.id === dealId);
+    const contextListingId = options?.dealContext?.listingId;
+    const contextCompanyId = options?.dealContext?.companyId;
+    const contextCompanyName = options?.dealContext?.companyName?.trim().toLowerCase();
+    const contextFarmerId = options?.dealContext?.farmerId;
+    const contextFarmerName = options?.dealContext?.farmerName?.trim().toLowerCase();
+    const contextResolvedDeal = !targetDeal && contextListingId
+      ? localDeals.find((deal) => (
+        deal.listingId === contextListingId
+        && (!contextCompanyId || deal.companyId === contextCompanyId)
+        && (!contextCompanyName || deal.companyName.trim().toLowerCase() === contextCompanyName)
+        && (!contextFarmerId || deal.farmerId === contextFarmerId)
+        && (!contextFarmerName || deal.farmerName.trim().toLowerCase() === contextFarmerName)
+      ))
+      : undefined;
+    const resolvedTargetDeal = targetDeal || contextResolvedDeal;
+    const effectiveDealId = resolvedTargetDeal?.id || dealId;
+
+    try {
+      const result = await apiRequest<{ success: boolean }>(`/crop-deals/${encodeURIComponent(effectiveDealId)}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          status,
+          actorRole: options?.actorRole,
+          actorId: options?.actorId,
+          agreedPrice: options?.agreedPrice,
+          quantityKg: options?.quantityKg,
+          paymentGateway: options?.paymentGateway,
+          paymentStatus: options?.paymentStatus,
+        }),
+      });
+      if (!result.success) {
+        throw new ApiRequestError(
+          'Backend returned unsuccessful deal status update.',
+          { isNetworkError: true },
+        );
+      }
+      if (result.success) {
+        if (options?.actorRole === 'farmer' && (status === 'confirmed' || status === 'locked' || status === 'accepted' || status === 'cancelled')) {
+          const rawCompanyName = options?.dealContext?.companyName || targetDeal?.companyName || 'Company';
+          const rawFarmerName = options?.dealContext?.farmerName || targetDeal?.farmerName || 'Farmer';
+          const resolvedCompanyId = options?.dealContext?.companyId
+            || targetDeal?.companyId
+            || resolveCompanyUser(undefined, rawCompanyName)?.id
+            || '';
+          const resolvedFarmerId = options?.dealContext?.farmerId
+            || targetDeal?.farmerId
+            || options?.actorId
+            || resolveFarmerUser(undefined, rawFarmerName)?.id
+            || '';
+          const notificationDeal = {
+            companyId: resolvedCompanyId,
+            companyName: rawCompanyName,
+            farmerId: resolvedFarmerId,
+            farmerName: rawFarmerName,
+            listingId: options?.dealContext?.listingId || targetDeal?.listingId || dealId,
+          };
+          addCompanyDealDecisionNotifications({
+            companyId: notificationDeal.companyId,
+            companyName: notificationDeal.companyName,
+            farmerName: notificationDeal.farmerName,
+            listingId: notificationDeal.listingId,
+          }, status);
+          addFarmerDealDecisionNotifications({
+            farmerId: notificationDeal.farmerId,
+            farmerName: notificationDeal.farmerName,
+            companyName: notificationDeal.companyName,
+            listingId: notificationDeal.listingId,
+          }, status);
+          markFarmerMatchRequestNotificationsResolved({
+            farmerId: notificationDeal.farmerId,
+            farmerName: notificationDeal.farmerName,
+            companyName: notificationDeal.companyName,
+            listingId: notificationDeal.listingId,
+          });
+        }
+        if (options?.actorRole === 'company' && (status === 'negotiating' || status === 'locked' || status === 'order_placed' || status === 'cancelled' || status === 'completed')) {
+          const rawCompanyName = options?.dealContext?.companyName || targetDeal?.companyName || 'Company';
+          const rawFarmerName = options?.dealContext?.farmerName || targetDeal?.farmerName || 'Farmer';
+          const resolvedFarmerId = options?.dealContext?.farmerId
+            || targetDeal?.farmerId
+            || resolveFarmerUser(undefined, rawFarmerName)?.id
+            || '';
+          const notificationDeal = {
+            companyName: rawCompanyName,
+            farmerId: resolvedFarmerId,
+            farmerName: rawFarmerName,
+            listingId: options?.dealContext?.listingId || targetDeal?.listingId || dealId,
+          };
+          addFarmerCompanyActionNotifications({
+            farmerId: notificationDeal.farmerId,
+            farmerName: notificationDeal.farmerName,
+            companyName: notificationDeal.companyName,
+            listingId: notificationDeal.listingId,
+          }, status);
+        }
+        emitNotificationsUpdated();
+      }
+      return result;
+    } catch (error) {
+      const allowLocalFallback = shouldFallbackToMock(error)
+        || (error instanceof ApiRequestError && error.status === 404 && Boolean(resolvedTargetDeal || options?.dealContext?.listingId))
+        || (error instanceof ApiRequestError && typeof error.status === 'number' && error.status >= 500);
+      if (!allowLocalFallback) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Could not update deal status.',
+        };
+      }
+      console.warn('[API] Falling back to local/mock flow for deal status:', error);
+    }
+
+    await delay(300);
+    const fallbackTargetDeal = resolvedTargetDeal || readCropDealsStore().find((deal) => deal.id === effectiveDealId) || readCropDealsStore().find((deal) => deal.id === dealId);
+    if (!fallbackTargetDeal) return { success: false };
+
+    const nowIso = new Date().toISOString();
+
     writeCropDealsStore(readCropDealsStore().map((deal) => (
-      deal.id === dealId
+      (deal.id === effectiveDealId || deal.id === dealId)
         ? {
           ...deal,
           status,
-          confirmedAt: status === 'confirmed' ? new Date().toISOString() : deal.confirmedAt,
+          agreedPrice: typeof options?.agreedPrice === 'number' ? options.agreedPrice : deal.agreedPrice,
+          quantityKg: typeof options?.quantityKg === 'number' ? options.quantityKg : deal.quantityKg,
+          confirmedAt: status === 'confirmed' ? nowIso : deal.confirmedAt,
+          paymentGateway: options?.paymentGateway ?? deal.paymentGateway,
+          paymentStatus: options?.paymentStatus ?? (status === 'completed' ? 'paid' : deal.paymentStatus),
         }
         : deal
     )));
+
+    if (status === 'confirmed') {
+      writeCropListingsStore(readCropListingsStore().map((listing) => (
+        listing.id === fallbackTargetDeal.listingId
+          ? { ...listing, status: 'matched', matchedCompanyId: fallbackTargetDeal.companyId }
+          : listing
+      )));
+    }
+
+    if (status === 'cancelled') {
+      writeCropListingsStore(readCropListingsStore().map((listing) => (
+        listing.id === fallbackTargetDeal.listingId
+          ? { ...listing, status: 'active', matchedCompanyId: undefined }
+          : listing
+      )));
+    }
+
+    if (options?.actorRole === 'farmer' && (status === 'confirmed' || status === 'locked' || status === 'accepted' || status === 'cancelled')) {
+      const rawCompanyName = options?.dealContext?.companyName || fallbackTargetDeal.companyName;
+      const rawFarmerName = options?.dealContext?.farmerName || fallbackTargetDeal.farmerName;
+      const resolvedCompanyId = options?.dealContext?.companyId
+        || fallbackTargetDeal.companyId
+        || resolveCompanyUser(undefined, rawCompanyName)?.id
+        || '';
+      const resolvedFarmerId = options?.dealContext?.farmerId
+        || fallbackTargetDeal.farmerId
+        || resolveFarmerUser(undefined, rawFarmerName)?.id
+        || '';
+      const notificationDeal = {
+        companyId: resolvedCompanyId,
+        companyName: rawCompanyName,
+        farmerId: resolvedFarmerId,
+        farmerName: rawFarmerName,
+        listingId: options?.dealContext?.listingId || fallbackTargetDeal.listingId,
+      };
+      addCompanyDealDecisionNotifications({
+        companyId: notificationDeal.companyId,
+        companyName: notificationDeal.companyName,
+        farmerName: notificationDeal.farmerName,
+        listingId: notificationDeal.listingId,
+      }, status, nowIso);
+      addFarmerDealDecisionNotifications({
+        farmerId: notificationDeal.farmerId,
+        farmerName: notificationDeal.farmerName,
+        companyName: notificationDeal.companyName,
+        listingId: notificationDeal.listingId,
+      }, status, nowIso);
+      markFarmerMatchRequestNotificationsResolved({
+        farmerId: notificationDeal.farmerId,
+        farmerName: notificationDeal.farmerName,
+        companyName: notificationDeal.companyName,
+        listingId: notificationDeal.listingId,
+      });
+    }
+    if (options?.actorRole === 'company' && (status === 'negotiating' || status === 'locked' || status === 'order_placed' || status === 'cancelled' || status === 'completed')) {
+      const rawCompanyName = options?.dealContext?.companyName || fallbackTargetDeal.companyName;
+      const rawFarmerName = options?.dealContext?.farmerName || fallbackTargetDeal.farmerName;
+      const resolvedFarmerId = options?.dealContext?.farmerId
+        || fallbackTargetDeal.farmerId
+        || resolveFarmerUser(undefined, rawFarmerName)?.id
+        || '';
+      const notificationDeal = {
+        companyName: rawCompanyName,
+        farmerId: resolvedFarmerId,
+        farmerName: rawFarmerName,
+        listingId: options?.dealContext?.listingId || fallbackTargetDeal.listingId,
+      };
+      addFarmerCompanyActionNotifications({
+        farmerId: notificationDeal.farmerId,
+        farmerName: notificationDeal.farmerName,
+        companyName: notificationDeal.companyName,
+        listingId: notificationDeal.listingId,
+      }, status, nowIso);
+    }
+
     return { success: true };
   },
 };
@@ -2157,47 +3018,69 @@ export const weatherService = {
 // ============================================================
 export const notificationService = {
   async getNotifications(userId: string): Promise<Notification[]> {
-    return apiOrMock(`/notifications/${encodeURIComponent(userId)}`, async () => {
+    const localNotifications = readNotificationsStore().filter((n) => n.userId === userId);
+
+    if (API_V1) {
+      try {
+        const apiNotifications = await apiRequest<Notification[]>(`/notifications/${encodeURIComponent(userId)}`);
+        const merged = new Map<string, Notification>();
+        [...apiNotifications, ...localNotifications].forEach((notification) => {
+          const key = notification.id || `${notification.title}_${notification.message}_${notification.createdAt}_${notification.userId}`;
+          merged.set(key, notification);
+        });
+        return Array.from(merged.values()).sort((left, right) => (
+          new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
+        ));
+      } catch (error) {
+        console.warn(`[API] Falling back to local/mock notifications for ${userId}:`, error);
+      }
+    }
+
     await delay(400);
-    return readNotificationsStore().filter((n) => n.userId === userId);
-    });
+    return localNotifications;
   },
 
   async markAsRead(notificationId: string): Promise<{ success: boolean }> {
+    const markLocally = () => {
+      const notifications = readNotificationsStore().map((notification) => (
+        notification.id === notificationId ? { ...notification, isRead: true } : notification
+      ));
+      writeNotificationsStore(notifications);
+    };
+
     try {
       const result = await apiRequest<{ success: boolean }>(`/notifications/${encodeURIComponent(notificationId)}/read`, { method: 'PATCH' });
-      if (canUseStorage()) {
-        window.dispatchEvent(new CustomEvent(NOTIFICATIONS_UPDATED_EVENT));
-      }
+      markLocally();
+      emitNotificationsUpdated();
       return result;
     } catch (error) {
       console.warn('[API] Falling back to local mock for notification read:', error);
     }
 
     await delay(200);
-    const notifications = readNotificationsStore().map((notification) => (
-      notification.id === notificationId ? { ...notification, isRead: true } : notification
-    ));
-    writeNotificationsStore(notifications);
+    markLocally();
     return { success: true };
   },
 
   async markAllAsRead(userId: string): Promise<{ success: boolean }> {
+    const markAllLocally = () => {
+      const notifications = readNotificationsStore().map((notification) => (
+        notification.userId === userId ? { ...notification, isRead: true } : notification
+      ));
+      writeNotificationsStore(notifications);
+    };
+
     try {
       const result = await apiRequest<{ success: boolean }>(`/notifications/user/${encodeURIComponent(userId)}/read-all`, { method: 'PATCH' });
-      if (canUseStorage()) {
-        window.dispatchEvent(new CustomEvent(NOTIFICATIONS_UPDATED_EVENT));
-      }
+      markAllLocally();
+      emitNotificationsUpdated();
       return result;
     } catch (error) {
       console.warn('[API] Falling back to local mock for notifications read all:', error);
     }
 
     await delay(300);
-    const notifications = readNotificationsStore().map((notification) => (
-      notification.userId === userId ? { ...notification, isRead: true } : notification
-    ));
-    writeNotificationsStore(notifications);
+    markAllLocally();
     return { success: true };
   },
 };
@@ -2239,17 +3122,112 @@ export const adminService = {
     const vendors = Array.from(new Set(readProductsStore().map((product) => product.vendorId)));
     const cases = readAdvisoryCasesStore();
     const tenants = readTenantsStore();
+    const orders = readOrdersStore();
+    const pendingSettlements = orders.filter((order) => order.settlementStatus === 'ready_for_release').length;
+    const heldSettlementAmount = orders
+      .filter((order) => order.settlementStatus === 'held' || order.settlementStatus === 'ready_for_release')
+      .reduce((sum, order) => sum + order.totalAmount, 0);
+    const releasedSettlementAmount = orders
+      .filter((order) => order.settlementStatus === 'released')
+      .reduce((sum, order) => sum + order.totalAmount, 0);
     return {
       totalFarmers: farmers.length,
       totalOfficers: officers.length,
       totalVendors: vendors.length,
       totalAdvisories: cases.length,
       activeAdvisories: cases.filter((item) => item.status !== 'closed' && item.status !== 'responded').length,
+      totalOrders: orders.length,
+      pendingSettlements,
+      heldSettlementAmount,
+      releasedSettlementAmount,
       mrr: tenants.reduce((sum, tenant) => sum + tenant.mrr, 0),
       uptime: MOCK_ADMIN_STATS.uptime,
       advisoryDeliveryRate: MOCK_ADMIN_STATS.advisoryDeliveryRate,
     };
     });
+  },
+
+  async getAdminOrders(filters?: Partial<{
+    status: Order['status'];
+    paymentStatus: Order['paymentStatus'];
+    settlementStatus: NonNullable<Order['settlementStatus']>;
+  }>): Promise<Order[]> {
+    const params = new URLSearchParams();
+    if (filters?.status) params.set('status', filters.status);
+    if (filters?.paymentStatus) params.set('paymentStatus', filters.paymentStatus);
+    if (filters?.settlementStatus) params.set('settlementStatus', filters.settlementStatus);
+    const query = params.toString();
+    return apiRequest<Order[]>(`/admin/orders${query ? `?${query}` : ''}`);
+  },
+
+  async updateOrderSettlement(orderId: string, action: 'release' | 'hold'): Promise<{ success: boolean; message?: string }> {
+    try {
+      return await apiRequest<{ success: boolean; message?: string }>(`/admin/orders/${encodeURIComponent(orderId)}/settlement`, {
+        method: 'PATCH',
+        body: JSON.stringify({ action, adminId: 'usr_adm_001' }),
+      });
+    } catch (error) {
+      if (!shouldFallbackToMock(error)) {
+        return { success: false, message: error instanceof Error ? error.message : 'Failed to update settlement.' };
+      }
+      console.warn('[API] Falling back to local mock for order settlement update:', error);
+    }
+
+    await delay(300);
+    const targetOrder = readOrdersStore().find((order) => order.id === orderId);
+    if (!targetOrder) {
+      return { success: false, message: 'Order not found.' };
+    }
+    const normalized = normalizeOrderSettlement(targetOrder);
+    if (action === 'release') {
+      if (!['delivered', 'completed'].includes(normalized.status)) {
+        return { success: false, message: 'Payment can be released only after delivery confirmation.' };
+      }
+      if (normalized.paymentStatus !== 'paid') {
+        return { success: false, message: 'Order payment is not completed yet.' };
+      }
+    }
+
+    const updatedAt = new Date().toISOString();
+    const settlementMeta = readJsonRecord<{
+      settlementStatus?: NonNullable<Order['settlementStatus']>;
+      settlementReleasedAt?: string;
+      settlementReleasedBy?: string;
+    }>(ADMIN_ORDER_SETTLEMENT_META_STORAGE_KEY);
+    writeJsonRecord(ADMIN_ORDER_SETTLEMENT_META_STORAGE_KEY, {
+      ...settlementMeta,
+      [orderId]: action === 'release'
+        ? {
+          settlementStatus: 'released',
+          settlementReleasedAt: updatedAt,
+          settlementReleasedBy: 'usr_adm_001',
+        }
+        : {
+          settlementStatus: 'held',
+          settlementReleasedAt: '',
+          settlementReleasedBy: '',
+        },
+    });
+
+    writeOrdersStore(readOrdersStore().map((order) => (
+      order.id === orderId
+        ? {
+          ...order,
+          settlementStatus: action === 'release' ? 'released' : 'held',
+          settlementReleasedAt: action === 'release' ? updatedAt : undefined,
+          settlementReleasedBy: action === 'release' ? 'usr_adm_001' : undefined,
+        }
+        : order
+    )));
+
+    addAuditLog({
+      entity: 'order',
+      action: action === 'release' ? 'settlement_release' : 'settlement_hold',
+      actor: 'Super Admin',
+      details: `${action === 'release' ? 'Released' : 'Held'} settlement for order ${orderId}.`,
+    });
+
+    return { success: true };
   },
 
   async getTenants(): Promise<Tenant[]> {
@@ -2348,6 +3326,18 @@ export const adminService = {
   },
 
   async updateFarmerAdminState(farmerId: string, data: Partial<{ verified: boolean; blocked: boolean }>): Promise<{ success: boolean }> {
+    try {
+      return await apiRequest<{ success: boolean }>(`/admin/farmers/${encodeURIComponent(farmerId)}/state`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      });
+    } catch (error) {
+      if (!shouldFallbackToMock(error)) {
+        return { success: false };
+      }
+      console.warn('[API] Falling back to local mock for farmer admin state:', error);
+    }
+
     await delay(250);
     const meta = readJsonRecord<{ verified: boolean; blocked: boolean }>(ADMIN_FARMER_META_STORAGE_KEY);
     writeJsonRecord(ADMIN_FARMER_META_STORAGE_KEY, {
@@ -2398,6 +3388,18 @@ export const adminService = {
   },
 
   async updateOfficerAdminState(officerId: string, data: Partial<{ active: boolean; assignedRegion: string }>): Promise<{ success: boolean }> {
+    try {
+      return await apiRequest<{ success: boolean }>(`/admin/officers/${encodeURIComponent(officerId)}/state`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      });
+    } catch (error) {
+      if (!shouldFallbackToMock(error)) {
+        return { success: false };
+      }
+      console.warn('[API] Falling back to local mock for officer admin state:', error);
+    }
+
     await delay(250);
     const meta = readJsonRecord<{ active: boolean; assignedRegion: string }>(ADMIN_OFFICER_META_STORAGE_KEY);
     writeJsonRecord(ADMIN_OFFICER_META_STORAGE_KEY, {

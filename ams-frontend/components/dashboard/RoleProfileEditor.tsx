@@ -59,6 +59,8 @@ export default function RoleProfileEditor({
   const [selectedDistrictId, setSelectedDistrictId] = useState('');
   const [locationLoading, setLocationLoading] = useState({ districts: false, upazilas: false });
   const [locationError, setLocationError] = useState({ districts: '', upazilas: '' });
+  const [deleting, setDeleting] = useState(false);
+  const [deleteMessage, setDeleteMessage] = useState('');
 
   useEffect(() => {
     setForm(buildForm());
@@ -69,6 +71,8 @@ export default function RoleProfileEditor({
     setSelectedDistrictId('');
     setLocationLoading({ districts: false, upazilas: false });
     setLocationError({ districts: '', upazilas: '' });
+    setDeleting(false);
+    setDeleteMessage('');
   }, [user]);
 
   useEffect(() => {
@@ -146,6 +150,7 @@ export default function RoleProfileEditor({
   };
 
   const handleStartEdit = () => {
+    if (deleting) return;
     setEditing(true);
     setSaved('');
   };
@@ -234,12 +239,36 @@ export default function RoleProfileEditor({
     }
   };
 
+  const handleDeleteAccount = async () => {
+    if (deleting) return;
+
+    const confirmed = window.confirm('Are you sure you want to delete your account? This action cannot be undone.');
+    if (!confirmed) return;
+
+    const secondConfirmation = window.confirm('Your profile, login, and account data will be removed. Continue?');
+    if (!secondConfirmation) return;
+
+    setDeleteMessage('');
+    setDeleting(true);
+
+    const result = await authService.deleteAccount(user.id);
+
+    if (!result.success) {
+      setDeleting(false);
+      setDeleteMessage(result.message || 'Account deletion failed. Please try again.');
+      return;
+    }
+
+    const loginHref = user.role === 'farmer' ? '/auth/farmer-login' : '/auth/admin-login';
+    window.location.href = loginHref;
+  };
+
   return (
     <Card>
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <SectionHeader title={title} subtitle={subtitle} />
         {!editing ? (
-          <button type="button" className="btn-outline" onClick={handleStartEdit}>
+          <button type="button" className="btn-outline disabled:opacity-60" disabled={deleting} onClick={handleStartEdit}>
             Edit Profile
           </button>
         ) : (
@@ -247,7 +276,7 @@ export default function RoleProfileEditor({
             <button type="button" className="btn-outline" onClick={handleCancel}>
               Cancel
             </button>
-            <button type="submit" form={`profile-form-${user.id}`} disabled={saving} className="btn-primary disabled:opacity-60">
+            <button type="submit" form={`profile-form-${user.id}`} disabled={saving || deleting} className="btn-primary disabled:opacity-60">
               {saving ? 'Saving...' : 'Save Changes'}
             </button>
           </div>
@@ -336,6 +365,19 @@ export default function RoleProfileEditor({
         {typeof extraFields === 'function' ? extraFields({ editable: editing }) : extraFields}
         {saved && <span className="text-sm text-green-600">{saved}</span>}
       </form>
+
+      <div className="mt-6 rounded-2xl border border-red-100 bg-red-50/60 p-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h3 className="text-base font-semibold text-red-700">Delete Account</h3>
+            <p className="text-sm text-red-600">Permanently remove this account from your dashboard.</p>
+          </div>
+          <button type="button" onClick={handleDeleteAccount} disabled={deleting || saving} className="btn-danger disabled:opacity-60">
+            {deleting ? 'Deleting...' : 'Delete Account'}
+          </button>
+        </div>
+        {deleteMessage && <p className="mt-3 text-sm text-red-600">{deleteMessage}</p>}
+      </div>
     </Card>
   );
 }

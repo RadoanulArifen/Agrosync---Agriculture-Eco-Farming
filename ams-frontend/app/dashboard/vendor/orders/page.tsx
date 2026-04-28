@@ -12,8 +12,6 @@ import { farmerService, orderService } from '@/services';
 import type { Farmer, Order } from '@/types';
 import { formatBDT, formatDate, formatDateTime } from '@/utils';
 
-const VENDOR_ID = 'vnd_001';
-
 const getVendorPaymentLabel = (order: Order) => {
   if (order.paymentGateway === 'cod') {
     return 'COD / collect on delivery';
@@ -57,13 +55,14 @@ export default function VendorOrdersPage() {
   const [message, setMessage] = useState('');
 
   const refreshOrders = async () => {
-    const data = await orderService.getOrders();
-    setOrders(data.filter((order) => order.vendorId === VENDOR_ID));
+    const vendorId = user.vendorId || user.id;
+    const data = await orderService.getOrders(undefined, vendorId);
+    setOrders(data);
   };
 
   useEffect(() => {
     refreshOrders();
-  }, []);
+  }, [user.id, user.vendorId]);
 
   useEffect(() => {
     const loadFarmers = async () => {
@@ -216,12 +215,14 @@ export default function VendorOrdersPage() {
                     <div className="grid grid-cols-3 gap-2 text-xs">
                       {[
                         { key: 'pending', label: 'Pending' },
+                        { key: 'confirmed', label: 'Confirmed' },
                         { key: 'dispatched', label: 'Shipped' },
                         { key: 'delivered', label: 'Delivered' },
                       ].map((step) => {
                         const activeStates: Record<string, Order['status'][]> = {
-                          pending: ['pending', 'confirmed', 'dispatched', 'delivered'],
-                          dispatched: ['dispatched', 'delivered'],
+                          pending: ['pending', 'confirmed', 'dispatched', 'delivered', 'completed'],
+                          confirmed: ['confirmed', 'dispatched', 'delivered', 'completed'],
+                          dispatched: ['dispatched', 'delivered', 'completed'],
                           delivered: ['delivered'],
                         };
                         const isActive = activeStates[step.key].includes(order.status);

@@ -26,9 +26,45 @@ export default function CompanyNotificationsPage() {
   };
 
   useEffect(() => {
-    loadNotifications();
-    cropService.getCropListings().then(setListings);
-    cropService.getCompanyMatches(user.id).then(setMatches);
+    let active = true;
+
+    const refreshAll = async () => {
+      if (!active) return;
+      const [nextNotifications, nextListings, nextMatches] = await Promise.all([
+        notificationService.getNotifications(user.id),
+        cropService.getCropListings(),
+        cropService.getCompanyMatches(user.id),
+      ]);
+
+      if (!active) return;
+      setSystemNotifications(nextNotifications);
+      setListings(nextListings);
+      setMatches(nextMatches);
+    };
+
+    void refreshAll();
+
+    const intervalId = window.setInterval(() => {
+      void refreshAll();
+    }, 5000);
+
+    const handleRefresh = () => {
+      void refreshAll();
+    };
+
+    window.addEventListener('focus', handleRefresh);
+    window.addEventListener('storage', handleRefresh);
+    window.addEventListener('ams:notifications-updated', handleRefresh);
+    window.addEventListener('ams:user-session-updated', handleRefresh);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleRefresh);
+      window.removeEventListener('storage', handleRefresh);
+      window.removeEventListener('ams:notifications-updated', handleRefresh);
+      window.removeEventListener('ams:user-session-updated', handleRefresh);
+    };
   }, [user.id]);
 
   const handleMarkAllAsDone = async () => {
@@ -41,14 +77,16 @@ export default function CompanyNotificationsPage() {
   };
 
   const alerts = useMemo(() => {
-    const farmerAcceptAlerts = matches.map((match) => ({
+    const farmerAcceptAlerts = matches
+      .filter((match) => ['confirmed', 'completed'].includes(match.status))
+      .map((match) => ({
       id: `match_${match.id}`,
       title: 'Farmer interest accepted',
       message: `${match.farmerName} is now matched with your company for listing ${match.listingId}.`,
       icon: Bell,
       color: 'border-blue-100 bg-blue-50 text-blue-700',
       createdAt: match.confirmedAt || new Date().toISOString(),
-    }));
+      }));
 
     const listingAlerts = listings.slice(0, 3).map((listing) => ({
       id: `listing_${listing.id}`,
@@ -107,7 +145,7 @@ export default function CompanyNotificationsPage() {
         </div>
         <div className="grid gap-4 md:grid-cols-3">
           <div className="rounded-2xl bg-blue-50 p-4">
-            <div className="text-xs text-blue-600">Matched Farmers</div>
+            <div className="text-xs text-blue-600">Active Deals</div>
             <div className="mt-1 text-2xl font-bold text-blue-900">{matches.length}</div>
           </div>
           <div className="rounded-2xl bg-green-50 p-4">

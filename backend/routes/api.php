@@ -15,6 +15,7 @@ Route::middleware(ApiCors::class)->prefix('v1')->group(function () {
     Route::get('/users', [AgroSyncController::class, 'users']);
     Route::patch('/users/{userId}', [AgroSyncController::class, 'updateUserProfile']);
     Route::patch('/users/{userId}/password', [AgroSyncController::class, 'changePassword']);
+    Route::delete('/users/{userId}', [AgroSyncController::class, 'deleteUserAccount']);
     Route::get('/farmers', [AgroSyncController::class, 'farmers']);
     Route::get('/advisory-cases', [AgroSyncController::class, 'advisoryCases']);
     Route::post('/advisory-cases', [AgroSyncController::class, 'submitAdvisory']);
@@ -37,9 +38,26 @@ Route::middleware(ApiCors::class)->prefix('v1')->group(function () {
 
     Route::get('/crop-listings', [AgroSyncController::class, 'cropListings']);
     Route::post('/crop-listings', [AgroSyncController::class, 'createCropListing']);
+    Route::patch('/crop-listings/{listingId}', [AgroSyncController::class, 'updateCropListing']);
+    Route::delete('/crop-listings/{listingId}', [AgroSyncController::class, 'deleteCropListing']);
     Route::post('/crop-deals/interest', [AgroSyncController::class, 'expressInterest']);
     Route::get('/crop-deals', [AgroSyncController::class, 'cropDeals']);
     Route::patch('/crop-deals/{dealId}/status', [AgroSyncController::class, 'updateDealStatus']);
+    Route::post('/payments/sslcommerz/initiate', [AgroSyncController::class, 'initiateSslCommerzPayment']);
+    Route::get('/payments/sslcommerz/mock-gateway', [AgroSyncController::class, 'sslCommerzMockGateway']);
+    Route::match(['get', 'post'], '/payments/sslcommerz/success', [AgroSyncController::class, 'sslCommerzSuccess']);
+    Route::match(['get', 'post'], '/payments/sslcommerz/fail', [AgroSyncController::class, 'sslCommerzFail']);
+    Route::match(['get', 'post'], '/payments/sslcommerz/cancel', [AgroSyncController::class, 'sslCommerzCancel']);
+    Route::post('/payments/stripe/initiate', [AgroSyncController::class, 'initiateStripePayment']);
+    Route::get('/payments/stripe/mock-gateway', [AgroSyncController::class, 'stripeMockGateway']);
+    Route::match(['get', 'post'], '/payments/stripe/success', [AgroSyncController::class, 'stripeSuccess']);
+    Route::match(['get', 'post'], '/payments/stripe/fail', [AgroSyncController::class, 'stripeFail']);
+    Route::match(['get', 'post'], '/payments/stripe/cancel', [AgroSyncController::class, 'stripeCancel']);
+    Route::post('/payments/orders/stripe/initiate', [AgroSyncController::class, 'initiateOrderStripePayment']);
+    Route::get('/payments/orders/stripe/mock-gateway', [AgroSyncController::class, 'orderStripeMockGateway']);
+    Route::match(['get', 'post'], '/payments/orders/stripe/success', [AgroSyncController::class, 'orderStripeSuccess']);
+    Route::match(['get', 'post'], '/payments/orders/stripe/fail', [AgroSyncController::class, 'orderStripeFail']);
+    Route::match(['get', 'post'], '/payments/orders/stripe/cancel', [AgroSyncController::class, 'orderStripeCancel']);
 
     Route::get('/crop-prices', [AgroSyncController::class, 'cropPrices']);
     Route::get('/weather', [AgroSyncController::class, 'weatherForecast']);
@@ -53,6 +71,10 @@ Route::middleware(ApiCors::class)->prefix('v1')->group(function () {
     Route::put('/settings/{userId}', [AgroSyncController::class, 'updateSettings']);
 
     Route::get('/admin/stats', [AgroSyncController::class, 'adminStats']);
+    Route::patch('/admin/farmers/{farmerId}/state', [AgroSyncController::class, 'updateFarmerAdminState']);
+    Route::patch('/admin/officers/{officerId}/state', [AgroSyncController::class, 'updateOfficerAdminState']);
+    Route::get('/admin/orders', [AgroSyncController::class, 'adminOrders']);
+    Route::patch('/admin/orders/{orderId}/settlement', [AgroSyncController::class, 'updateOrderSettlement']);
     Route::get('/admin/tenants', [AgroSyncController::class, 'tenants']);
     Route::post('/admin/tenants', [AgroSyncController::class, 'createTenant']);
     Route::patch('/admin/tenants/{tenantId}', [AgroSyncController::class, 'updateTenant']);

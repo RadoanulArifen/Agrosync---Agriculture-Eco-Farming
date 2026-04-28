@@ -15,7 +15,7 @@ import { priceService } from '@/services';
 import type { CropPrice } from '@/types';
 
 export default function CompanyPricesPage() {
-  const { user } = useRoleUserContext({ role: 'company', fallbackUser: COMPANY_FALLBACK_USER });
+  const { user, notificationCount } = useRoleUserContext({ role: 'company', fallbackUser: COMPANY_FALLBACK_USER });
   const [prices, setPrices] = useState<CropPrice[]>([]);
   const [selectedCrop, setSelectedCrop] = useState('Rice (Aman)');
 
@@ -31,7 +31,7 @@ export default function CompanyPricesPage() {
       role="company"
       userName={user.companyName || user.name}
       userSubtitle={user.designation || 'Procurement Company'}
-      notificationCount={0}
+      notificationCount={notificationCount}
     >
       <PageHeader title="Price Analytics" subtitle="Track market price trends and identify which crop prices are moving up or down" />
 

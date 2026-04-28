@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, ArrowRight, Building2, CreditCard, MessageSquare,
-  Search, UserCheck, Users,
+  Search, ShoppingCart, UserCheck, Users,
 } from 'lucide-react';
 import {
   Bar, BarChart, CartesianGrid, Cell, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -124,7 +124,7 @@ export default function AdminDashboard() {
         <Link href="/dashboard/admin/farmers"><StatCard label="Total Farmers" value={stats.totalFarmers} icon={Users} iconBg="bg-blue-50" trend={{ value: 'Open farmers page', positive: true }} /></Link>
         <Link href="/dashboard/admin/advisory"><StatCard label="Advisory Cases" value={stats.totalAdvisories} icon={MessageSquare} iconBg="bg-purple-50" trend={{ value: 'Open cases list', positive: true }} /></Link>
         <Link href="/dashboard/admin/billing"><StatCard label="Monthly Revenue" value={formatBDT(stats.mrr)} icon={CreditCard} iconBg="bg-green-50" trend={{ value: 'Open billing', positive: true }} /></Link>
-        <Link href="/dashboard/admin/officers"><StatCard label="Active Officers" value={stats.totalOfficers} icon={UserCheck} iconBg="bg-orange-50" trend={{ value: 'Open officers', positive: true }} /></Link>
+        <Link href="/dashboard/admin/orders"><StatCard label="Ready Settlements" value={stats.pendingSettlements ?? 0} icon={ShoppingCart} iconBg="bg-orange-50" trend={{ value: 'Open order control', positive: true }} /></Link>
       </div>
 
       <div className="mb-6 grid gap-6 lg:grid-cols-3">
@@ -225,6 +225,7 @@ export default function AdminDashboard() {
               { href: '/dashboard/admin/farmers', label: 'Farmers', desc: 'User control', icon: Users },
               { href: '/dashboard/admin/officers', label: 'Officers', desc: 'Workforce manage', icon: UserCheck },
               { href: '/dashboard/admin/vendors', label: 'Vendors', desc: 'Marketplace control', icon: Building2 },
+              { href: '/dashboard/admin/orders', label: 'Orders', desc: 'Escrow settlement', icon: ShoppingCart },
               { href: '/dashboard/admin/advisory', label: 'Cases', desc: 'Advisory system', icon: MessageSquare },
               { href: '/dashboard/admin/billing', label: 'Billing', desc: 'Money', icon: CreditCard },
               { href: '/dashboard/admin/analytics', label: 'Analytics', desc: 'Insights', icon: Building2 },

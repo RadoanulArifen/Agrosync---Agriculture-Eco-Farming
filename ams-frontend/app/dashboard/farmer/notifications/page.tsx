@@ -5,30 +5,101 @@ import { Bell, CheckCheck } from 'lucide-react';
 import DashboardShell from '@/components/dashboard/DashboardShell';
 import { Card, EmptyState, PageHeader, SectionHeader } from '@/components/dashboard/DashboardComponents';
 import { FARMER_NAV_ITEMS, useFarmerContext } from '@/components/dashboard/useFarmerContext';
-import { notificationService } from '@/services';
+import { cropService, notificationService } from '@/services';
 import type { Notification } from '@/types';
 import { formatDateTime } from '@/utils';
 
 export default function FarmerNotificationsPage() {
   const { farmer, unreadNotifications, loading } = useFarmerContext();
   const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [pendingDealIdsByListing, setPendingDealIdsByListing] = useState<Record<string, string>>({});
   const [markingAll, setMarkingAll] = useState(false);
+  const [processingNotificationId, setProcessingNotificationId] = useState<string | null>(null);
+
+  const extractListingId = (message: string): string | undefined => (
+    message.match(/\(([^)]+)\)\.?$/)?.[1]?.trim() || undefined
+  );
+
+  const isNewMatchRequest = (notification: Notification): boolean => (
+    notification.type === 'crop_deal' && notification.title === 'New Match Request'
+  );
 
   const loadNotifications = async (farmerId: string) => {
-    const nextNotifications = await notificationService.getNotifications(farmerId);
+    const [nextNotifications, deals] = await Promise.all([
+      notificationService.getNotifications(farmerId),
+      cropService.getFarmerDeals(farmerId),
+    ]);
+    const pendingMap: Record<string, string> = {};
+    deals
+      .filter((deal) => deal.status === 'pending')
+      .forEach((deal) => {
+        if (!pendingMap[deal.listingId]) {
+          pendingMap[deal.listingId] = deal.id;
+        }
+      });
+
+    setPendingDealIdsByListing(pendingMap);
     setNotifications(nextNotifications);
     return nextNotifications;
   };
 
-  useEffect(() => {
+  const handleMatchDecision = async (notification: Notification, status: 'confirmed' | 'cancelled') => {
     if (!farmer) return;
+    const listingId = extractListingId(notification.message);
+    if (!listingId) return;
+    const dealId = pendingDealIdsByListing[listingId];
+    if (!dealId) return;
 
-    loadNotifications(farmer.id).then(async (nextNotifications) => {
+    setProcessingNotificationId(notification.id);
+    const result = await cropService.updateDealStatus(dealId, status, {
+      actorRole: 'farmer',
+      actorId: farmer.id,
+    });
+    setProcessingNotificationId(null);
+
+    if (!result.success) return;
+    await loadNotifications(farmer.id);
+  };
+
+  useEffect(() => {
+    if (!farmer) return undefined;
+
+    let active = true;
+
+    const refreshNotifications = async () => {
+      if (!active) return;
+      const nextNotifications = await loadNotifications(farmer.id);
       if (nextNotifications.some((notification) => !notification.isRead)) {
         await notificationService.markAllAsRead(farmer.id);
-        await loadNotifications(farmer.id);
+        if (active) {
+          await loadNotifications(farmer.id);
+        }
       }
-    });
+    };
+
+    void refreshNotifications();
+
+    const intervalId = window.setInterval(() => {
+      void refreshNotifications();
+    }, 5000);
+
+    const handleRefresh = () => {
+      void refreshNotifications();
+    };
+
+    window.addEventListener('focus', handleRefresh);
+    window.addEventListener('storage', handleRefresh);
+    window.addEventListener('ams:notifications-updated', handleRefresh);
+    window.addEventListener('ams:user-session-updated', handleRefresh);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleRefresh);
+      window.removeEventListener('storage', handleRefresh);
+      window.removeEventListener('ams:notifications-updated', handleRefresh);
+      window.removeEventListener('ams:user-session-updated', handleRefresh);
+    };
   }, [farmer]);
 
   const handleMarkAllAsDone = async () => {
@@ -81,6 +152,34 @@ export default function FarmerNotificationsPage() {
                   <div className="text-sm font-semibold text-gray-800">{notification.title}</div>
                   <div className="text-sm text-gray-500 mt-1">{notification.message}</div>
                   <div className="text-xs text-gray-400 mt-2">{formatDateTime(notification.createdAt)}</div>
+                  {isNewMatchRequest(notification) && (() => {
+                    const listingId = extractListingId(notification.message);
+                    const dealId = listingId ? pendingDealIdsByListing[listingId] : undefined;
+                    if (!dealId) return null;
+
+                    const isBusy = processingNotificationId === notification.id;
+
+                    return (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleMatchDecision(notification, 'confirmed')}
+                          className="btn-primary px-3 py-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {isBusy ? 'Updating...' : 'Accept Request'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleMatchDecision(notification, 'cancelled')}
+                          className="btn-danger px-3 py-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {isBusy ? 'Updating...' : 'Reject Request'}
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             </Card>

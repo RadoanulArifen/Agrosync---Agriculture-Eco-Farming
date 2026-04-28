@@ -18,6 +18,7 @@ export default function FarmerAdvisoryPage() {
   const [submitting, setSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
   const [photoPreview, setPhotoPreview] = useState('');
+  const [search, setSearch] = useState('');
   const [form, setForm] = useState<{ cropType: string; priority: AdvisoryPriority; description: string }>({ cropType: '', priority: 'normal', description: '' });
 
   const compressImage = (file: File) => new Promise<string>((resolve, reject) => {
@@ -84,6 +85,17 @@ export default function FarmerAdvisoryPage() {
     );
   }
 
+  const filteredCases = cases.filter((caseItem) => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return (
+      caseItem.id.toLowerCase().includes(q)
+      || caseItem.cropType.toLowerCase().includes(q)
+      || caseItem.description.toLowerCase().includes(q)
+      || (caseItem.status || '').toLowerCase().includes(q)
+    );
+  });
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
@@ -124,6 +136,15 @@ export default function FarmerAdvisoryPage() {
             {showForm ? 'Hide Form' : 'New Advisory'}
           </button>
         </div>
+
+        <Card>
+          <input
+            className="input-field"
+            placeholder="Search advisory by case ID, crop, status, or description..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </Card>
 
         {showForm && (
           <Card>
@@ -188,13 +209,13 @@ export default function FarmerAdvisoryPage() {
           </Card>
         )}
 
-        {cases.length === 0 ? (
+        {filteredCases.length === 0 ? (
           <Card>
-            <EmptyState icon={MessageSquare} title="No advisory cases yet" description="Submitted advisory cases will appear here." />
+            <EmptyState icon={MessageSquare} title="No advisory cases found" description="Try another search or submit a new advisory request." />
           </Card>
         ) : (
           <div className="grid md:grid-cols-2 gap-4">
-            {cases.map((caseItem) => (
+            {filteredCases.map((caseItem) => (
               <Card key={caseItem.id}>
                 <div className="flex items-start justify-between gap-3 mb-3">
                   <div>

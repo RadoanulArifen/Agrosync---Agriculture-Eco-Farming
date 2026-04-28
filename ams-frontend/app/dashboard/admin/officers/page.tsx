@@ -11,6 +11,8 @@ export default function AdminOfficersPage() {
   const { user } = useRoleUserContext({ role: 'admin', fallbackUser: ADMIN_FALLBACK_USER });
   const [officers, setOfficers] = useState<Array<any>>([]);
   const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const [viewOfficer, setViewOfficer] = useState<any | null>(null);
   const [form, setForm] = useState({ name: '', email: '', phone: '', region: '' });
 
   const refresh = async () => setOfficers(await adminService.getOfficers());
@@ -26,13 +28,36 @@ export default function AdminOfficersPage() {
     <DashboardShell navItems={ADMIN_NAV_ITEMS} role="admin" userName={user.name} userSubtitle={user.designation || 'Platform Administrator'}>
       <PageHeader title="Officers" subtitle="Add officers, assign region, track performance, and activate/deactivate" />
       {message && <Card className="mb-6 border-green-200 bg-green-50"><div className="text-sm text-green-700">{message}</div></Card>}
+      {error && <Card className="mb-6 border-red-200 bg-red-50"><div className="text-sm text-red-700">{error}</div></Card>}
+
+      {viewOfficer && (
+        <Card className="mb-6">
+          <SectionHeader title="Officer Details" subtitle={`Profile view for ${viewOfficer.name}`} />
+          <div className="grid gap-3 md:grid-cols-2 text-sm text-gray-700">
+            <div><span className="text-gray-400">Name:</span> {viewOfficer.name}</div>
+            <div><span className="text-gray-400">Email:</span> {viewOfficer.email || '-'}</div>
+            <div><span className="text-gray-400">Phone:</span> {viewOfficer.phone || '-'}</div>
+            <div><span className="text-gray-400">Status:</span> {viewOfficer.availabilityStatus || 'available'}</div>
+            <div className="md:col-span-2"><span className="text-gray-400">Region:</span> {(viewOfficer.regionDistricts || []).join(', ') || '-'}</div>
+          </div>
+          <div className="mt-3">
+            <button type="button" className="btn-outline px-4 py-2 text-sm" onClick={() => setViewOfficer(null)}>Close View</button>
+          </div>
+        </Card>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-[1fr_1.6fr]">
         <Card>
           <SectionHeader title="Add Officer" subtitle="New workforce registration" />
           <form className="space-y-4" onSubmit={async (e) => {
             e.preventDefault();
-            await adminService.addOfficer(form);
+            setMessage('');
+            setError('');
+            const result = await adminService.addOfficer(form);
+            if (!result.success) {
+              setError('Could not add officer.');
+              return;
+            }
             setMessage('Officer added successfully.');
             setForm({ name: '', email: '', phone: '', region: '' });
             refresh();
@@ -60,9 +85,35 @@ export default function AdminOfficersPage() {
                     <div className="mt-1 text-sm text-gray-500">Region: {(officer.regionDistricts || []).join(', ')}</div>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <button type="button" onClick={async () => { await adminService.updateOfficerAdminState(officer.id, { assignedRegion: 'Dhaka, Savar' }); setMessage('Officer region assigned.'); refresh(); }} className="btn-outline px-4 py-2 text-sm">Assign Region</button>
-                    <button type="button" className="btn-info px-4 py-2 text-sm">View Performance</button>
-                    <button type="button" onClick={async () => { await adminService.updateOfficerAdminState(officer.id, { active: officer.availabilityStatus === 'offline' }); setMessage(`Officer ${officer.availabilityStatus === 'offline' ? 'activated' : 'disabled'}.`); refresh(); }} className="btn-danger px-4 py-2 text-sm">
+                    <button type="button" onClick={async () => {
+                      setMessage('');
+                      setError('');
+                      const assignedRegion = (officer.regionDistricts && officer.regionDistricts.length > 0)
+                        ? officer.regionDistricts.join(', ')
+                        : (officer.district || 'Dhaka');
+                      const result = await adminService.updateOfficerAdminState(officer.id, { assignedRegion });
+                      if (!result.success) {
+                        setError('Could not assign officer region.');
+                        return;
+                      }
+                      setMessage('Officer region assigned.');
+                      refresh();
+                    }} className="btn-outline px-4 py-2 text-sm">Assign Region</button>
+                    <button type="button" onClick={() => {
+                      setMessage(`Performance: ${officer.name} solved ${officer.solved} cases with ${officer.avgTime} average response time.`);
+                      setViewOfficer(officer);
+                    }} className="btn-info px-4 py-2 text-sm">View Performance</button>
+                    <button type="button" onClick={async () => {
+                      setMessage('');
+                      setError('');
+                      const result = await adminService.updateOfficerAdminState(officer.id, { active: officer.availabilityStatus === 'offline' });
+                      if (!result.success) {
+                        setError(`Could not ${officer.availabilityStatus === 'offline' ? 'activate' : 'disable'} officer.`);
+                        return;
+                      }
+                      setMessage(`Officer ${officer.availabilityStatus === 'offline' ? 'activated' : 'disabled'}.`);
+                      refresh();
+                    }} className="btn-danger px-4 py-2 text-sm">
                       {officer.availabilityStatus === 'offline' ? 'Activate' : 'Disable'}
                     </button>
                   </div>

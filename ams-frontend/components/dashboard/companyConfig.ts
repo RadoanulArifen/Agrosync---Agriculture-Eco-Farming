@@ -1,12 +1,13 @@
 import {
-  Bell, HandshakeIcon, LayoutDashboard, Settings, TrendingUp, User, Wheat,
+  Bell, LayoutDashboard, Package, Settings, ShoppingCart, TrendingUp, User, Wheat,
 } from 'lucide-react';
 import type { NavItem } from '@/components/dashboard/DashboardShell';
 
 export const COMPANY_NAV_ITEMS: NavItem[] = [
   { href: '/dashboard/company', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/dashboard/company/listings', label: 'Browse Listings', icon: Wheat },
-  { href: '/dashboard/company/matches', label: 'Matched Farmers', icon: HandshakeIcon },
+  { href: '/dashboard/company/cart', label: 'Cart', icon: ShoppingCart },
+  { href: '/dashboard/company/orders', label: 'My Orders', icon: Package },
   { href: '/dashboard/company/prices', label: 'Price Analytics', icon: TrendingUp },
   { href: '/dashboard/company/profile', label: 'My Profile', icon: User },
   { href: '/dashboard/company/notifications', label: 'Notifications', icon: Bell },

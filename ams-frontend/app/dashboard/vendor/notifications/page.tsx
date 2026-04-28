@@ -14,14 +14,13 @@ import { notificationService, orderService, productService } from '@/services';
 import type { Notification, Order, Product } from '@/types';
 import { formatBDT, formatDateTime } from '@/utils';
 
-const VENDOR_ID = 'vnd_001';
-
 export default function VendorNotificationsPage() {
   const { user, notificationCount } = useRoleUserContext({ role: 'vendor', fallbackUser: VENDOR_FALLBACK_USER });
   const [orders, setOrders] = useState<Order[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [systemNotifications, setSystemNotifications] = useState<Notification[]>([]);
   const [markingAll, setMarkingAll] = useState(false);
+  const vendorId = user.vendorId || user.id;
 
   const loadNotifications = async () => {
     const nextNotifications = await notificationService.getNotifications(user.id);
@@ -31,9 +30,9 @@ export default function VendorNotificationsPage() {
 
   useEffect(() => {
     loadNotifications();
-    productService.getProducts(undefined, VENDOR_ID).then(setProducts);
-    orderService.getOrders().then((data) => setOrders(data.filter((order) => order.vendorId === VENDOR_ID)));
-  }, [user.id]);
+    productService.getProducts(undefined, vendorId).then(setProducts);
+    orderService.getOrders(undefined, vendorId).then(setOrders);
+  }, [user.id, user.vendorId, vendorId]);
 
   const handleMarkAllAsDone = async () => {
     if (notificationCount === 0) return;

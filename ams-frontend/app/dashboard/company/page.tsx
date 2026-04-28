@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import {
-  ArrowRight, Bell, HandshakeIcon, Search, TrendingUp, Wheat,
+  ArrowRight, Bell, Package, Search, ShoppingCart, TrendingUp, Wheat,
 } from 'lucide-react';
 import {
   Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid,
@@ -19,7 +19,7 @@ import type { CropDeal, CropListing, CropPrice } from '@/types';
 import { formatBDT, formatDate } from '@/utils';
 
 export default function CompanyDashboard() {
-  const { user } = useRoleUserContext({ role: 'company', fallbackUser: COMPANY_FALLBACK_USER });
+  const { user, notificationCount } = useRoleUserContext({ role: 'company', fallbackUser: COMPANY_FALLBACK_USER });
   const [listings, setListings] = useState<CropListing[]>([]);
   const [prices, setPrices] = useState<CropPrice[]>([]);
   const [matches, setMatches] = useState<CropDeal[]>([]);
@@ -30,8 +30,19 @@ export default function CompanyDashboard() {
     priceService.getCropPrices().then(setPrices);
   }, [user.id]);
 
+  const acceptedMatches = useMemo(
+    () => matches.filter((match) => ['confirmed', 'completed'].includes(match.status)),
+    [matches],
+  );
+  const cartItems = useMemo(
+    () => matches.filter((match) => ['confirmed', 'negotiating', 'locked'].includes(match.status)).length,
+    [matches],
+  );
+  const myOrders = useMemo(
+    () => matches.filter((match) => ['order_placed', 'accepted', 'delivered', 'completed'].includes(match.status)).length,
+    [matches],
+  );
   const activeListings = useMemo(() => listings.filter((listing) => listing.status === 'active'), [listings]);
-  const matchedFarmers = useMemo(() => matches.length, [matches]);
   const avgMarketPrice = useMemo(() => {
     if (!prices.length) return 0;
     return Math.round(prices.reduce((sum, price) => sum + price.currentPrice, 0) / prices.length);
@@ -49,18 +60,18 @@ export default function CompanyDashboard() {
       role="company"
       userName={user.companyName || user.name}
       userSubtitle={user.designation || 'Procurement Company'}
-      notificationCount={matchedFarmers}
+      notificationCount={notificationCount}
     >
       <PageHeader
         title="Company Dashboard"
-        subtitle="Overview of active listings, matched farmers, market prices, and company quick stats"
+        subtitle="Overview of active listings, cart activity, market prices, and company quick stats"
       />
 
       <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard label="Active Listings Count" value={activeListings.length} icon={Wheat} iconBg="bg-green-50" />
-        <StatCard label="Matched Farmers" value={matchedFarmers} icon={HandshakeIcon} iconBg="bg-blue-50" />
+        <StatCard label="Cart Items" value={cartItems} icon={ShoppingCart} iconBg="bg-blue-50" />
         <StatCard label="Market Price" value={`${formatBDT(avgMarketPrice)}/kg`} icon={TrendingUp} iconBg="bg-amber-50" />
-        <StatCard label="Quick Stats" value={quickStats.reduce((sum, item) => sum + Number(item.value), 0)} icon={Bell} iconBg="bg-rose-50" />
+        <StatCard label="My Orders" value={myOrders} icon={Package} iconBg="bg-rose-50" />
       </div>
 
       <div className="mb-6 grid gap-6 lg:grid-cols-3">
@@ -88,7 +99,8 @@ export default function CompanyDashboard() {
           <div className="space-y-3">
             {[
               { href: '/dashboard/company/listings', label: 'Browse Listings', detail: 'Search, filter, and express interest', icon: Search },
-              { href: '/dashboard/company/matches', label: 'Matched Farmers', detail: 'Negotiate and place order', icon: HandshakeIcon },
+              { href: '/dashboard/company/cart', label: 'Cart', detail: 'Review items, pay, and send order', icon: ShoppingCart },
+              { href: '/dashboard/company/orders', label: 'My Orders', detail: 'Track order status from farmer side', icon: Package },
               { href: '/dashboard/company/prices', label: 'Price Analytics', detail: 'Track crop price movement', icon: TrendingUp },
               { href: '/dashboard/company/notifications', label: 'Notifications', detail: 'Alerts for listing and order updates', icon: Bell },
             ].map((item) => {
@@ -149,12 +161,12 @@ export default function CompanyDashboard() {
       </div>
 
       <Card>
-        <SectionHeader title="Already Matched" subtitle="Deals now in connection stage" />
-        {matches.length === 0 ? (
-          <div className="text-sm text-gray-500">No matched farmers yet. Express interest from Browse Listings.</div>
+        <SectionHeader title="Order Pipeline" subtitle="Recent company deals and fulfillment stage" />
+        {acceptedMatches.length === 0 ? (
+          <div className="text-sm text-gray-500">No active deals yet. Add listings to cart from Browse Listings.</div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
-            {matches.map((match) => (
+            {acceptedMatches.map((match) => (
               <div key={match.id} className="rounded-2xl border border-blue-100 bg-blue-50/40 p-4">
                 <div className="flex items-center justify-between">
                   <div className="font-semibold text-gray-900">{match.farmerName}</div>

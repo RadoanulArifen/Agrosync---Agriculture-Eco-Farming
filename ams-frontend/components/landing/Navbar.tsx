@@ -2,18 +2,67 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { Menu, X, Leaf } from 'lucide-react';
-import { NAV_LINKS } from '@/constants';
+import { DASHBOARD_ROUTES, NAV_LINKS } from '@/constants';
+import { authService } from '@/services';
+import type { ManagedUserRole } from '@/types';
 import { cn } from '@/utils';
 
 export default function Navbar() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const [dashboardHref, setDashboardHref] = useState<string | null>(null);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 60);
     window.addEventListener('scroll', onScroll);
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
+
+  useEffect(() => {
+    const resolveDashboardHref = () => {
+      const currentFarmer = authService.getCurrentFarmer();
+      if (currentFarmer?.id) {
+        setDashboardHref(DASHBOARD_ROUTES.farmer);
+        return;
+      }
+
+      const currentUser = authService.getCurrentUser();
+      const role = currentUser?.role as ManagedUserRole | undefined;
+      if (role && role in DASHBOARD_ROUTES) {
+        setDashboardHref(DASHBOARD_ROUTES[role]);
+        return;
+      }
+
+      setDashboardHref(null);
+    };
+
+    resolveDashboardHref();
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key && ![
+        'ams_current_role_user_id',
+        'ams_current_farmer_id',
+        'ams_current_role_user_ids_by_role',
+      ].includes(event.key)) {
+        return;
+      }
+      resolveDashboardHref();
+    };
+
+    const handleUserSessionUpdated = () => {
+      resolveDashboardHref();
+    };
+
+    window.addEventListener('storage', handleStorage);
+    window.addEventListener('ams:user-session-updated', handleUserSessionUpdated);
+
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('ams:user-session-updated', handleUserSessionUpdated);
+    };
+  }, []);
+
+  const hasActiveSession = Boolean(dashboardHref);
 
   return (
     <header
@@ -56,21 +105,29 @@ export default function Navbar() {
 
         {/* CTA Buttons */}
         <div className="hidden md:flex items-center gap-3">
-          <Link
-            href="/auth/farmer-login"
-            className={cn(
-              'text-sm font-semibold px-4 py-2 rounded-full transition-colors',
-              scrolled ? 'text-forest hover:text-harvest' : 'text-white hover:text-harvest',
-            )}
-          >
-            Farmer Login
-          </Link>
-          <Link
-            href="/auth/admin-login"
-            className="btn-primary text-sm py-2.5"
-          >
-            Dashboard Access
-          </Link>
+          {hasActiveSession ? (
+            <Link href={dashboardHref || '/'} className="btn-primary text-sm py-2.5">
+              Go to Dashboard
+            </Link>
+          ) : (
+            <>
+              <Link
+                href="/auth/farmer-login"
+                className={cn(
+                  'text-sm font-semibold px-4 py-2 rounded-full transition-colors',
+                  scrolled ? 'text-forest hover:text-harvest' : 'text-white hover:text-harvest',
+                )}
+              >
+                Farmer Login
+              </Link>
+              <Link
+                href="/auth/admin-login"
+                className="btn-primary text-sm py-2.5"
+              >
+                Dashboard Access
+              </Link>
+            </>
+          )}
         </div>
 
         {/* Mobile Menu Toggle */}
@@ -100,12 +157,20 @@ export default function Navbar() {
             </a>
           ))}
           <hr className="border-gray-100 my-1" />
-          <Link href="/auth/farmer-login" className="btn-secondary text-center text-sm">
-            Farmer Login
-          </Link>
-          <Link href="/auth/admin-login" className="btn-primary text-center text-sm">
-            Dashboard Access
-          </Link>
+          {hasActiveSession ? (
+            <Link href={dashboardHref || '/'} className="btn-primary text-center text-sm" onClick={() => setMenuOpen(false)}>
+              Go to Dashboard
+            </Link>
+          ) : (
+            <>
+              <Link href="/auth/farmer-login" className="btn-secondary text-center text-sm" onClick={() => setMenuOpen(false)}>
+                Farmer Login
+              </Link>
+              <Link href="/auth/admin-login" className="btn-primary text-center text-sm" onClick={() => setMenuOpen(false)}>
+                Dashboard Access
+              </Link>
+            </>
+          )}
         </div>
       )}
     </header>

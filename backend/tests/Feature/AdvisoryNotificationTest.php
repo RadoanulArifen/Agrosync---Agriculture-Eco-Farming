@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Tests\TestCase;
 
@@ -14,7 +15,7 @@ class AdvisoryNotificationTest extends TestCase
     {
         $this->artisan('migrate');
 
-        \DB::table('users')->insert([
+        DB::table('users')->insert([
             [
                 'public_id' => 'usr_far_900',
                 'tenant_id' => 'tenant_900',
@@ -43,7 +44,7 @@ class AdvisoryNotificationTest extends TestCase
             ],
         ]);
 
-        \DB::table('farmers')->insert([
+        DB::table('farmers')->insert([
             'id' => 'usr_far_900',
             'user_id' => 'usr_far_900',
             'tenant_id' => 'tenant_900',
@@ -59,7 +60,7 @@ class AdvisoryNotificationTest extends TestCase
             'updated_at' => now(),
         ]);
 
-        \DB::table('officers')->insert([
+        DB::table('officers')->insert([
             'id' => 'usr_off_900',
             'user_id' => 'usr_off_900',
             'tenant_id' => 'tenant_900',

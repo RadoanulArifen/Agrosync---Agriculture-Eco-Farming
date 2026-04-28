@@ -10,7 +10,7 @@ import { useRoleUserContext } from '@/components/dashboard/useRoleUserContext';
 import { authService, userSettingsService } from '@/services';
 
 export default function CompanySettingsPage() {
-  const { user } = useRoleUserContext({ role: 'company', fallbackUser: COMPANY_FALLBACK_USER });
+  const { user, notificationCount } = useRoleUserContext({ role: 'company', fallbackUser: COMPANY_FALLBACK_USER });
   const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '' });
   const [settings, setSettings] = useState({
     emailNotifications: true,
@@ -65,7 +65,7 @@ export default function CompanySettingsPage() {
       role="company"
       userName={user.companyName || user.name}
       userSubtitle={user.designation || 'Procurement Company'}
-      notificationCount={0}
+      notificationCount={notificationCount}
     >
       <PageHeader title="Settings" subtitle="Password change and company notification settings" />
 

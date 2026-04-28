@@ -25,16 +25,10 @@ export default function OfficerCaseBoard({
   const [submitting, setSubmitting] = useState(false);
   const [respondedIds, setRespondedIds] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState('');
+  const [search, setSearch] = useState('');
 
   const loadCases = async () => {
-    const allCases = await advisoryService.getAdvisoryCases();
-    const nextCases = allCases.filter((caseItem) => (
-      caseItem.status === 'pending'
-      || caseItem.status === 'assigned'
-      || caseItem.status === 'ai_analyzed'
-      || caseItem.officerId === user.id
-      || caseItem.officerId === user.officerId
-    ));
+    const nextCases = await advisoryService.getOfficerCases(user.id);
     setCases(nextCases);
 
     const nextPendingCases = nextCases.filter((caseItem) => (
@@ -60,6 +54,17 @@ export default function OfficerCaseBoard({
     () => cases.filter((c) => c.status === 'pending' || c.status === 'assigned' || c.status === 'ai_analyzed'),
     [cases],
   );
+  const filteredPending = useMemo(() => {
+    if (!search.trim()) return pending;
+    const q = search.toLowerCase();
+    return pending.filter((item) => (
+      item.id.toLowerCase().includes(q)
+      || item.farmerName.toLowerCase().includes(q)
+      || item.cropType.toLowerCase().includes(q)
+      || item.description.toLowerCase().includes(q)
+      || item.farmerDistrict.toLowerCase().includes(q)
+    ));
+  }, [pending, search]);
   const responded = useMemo(
     () => cases.filter((c) => (
       c.status === 'responded'
@@ -94,11 +99,19 @@ export default function OfficerCaseBoard({
     <div className={`grid ${listOnly ? 'grid-cols-1' : compact ? 'xl:grid-cols-[1.1fr_0.9fr]' : 'lg:grid-cols-2'} gap-6`}>
       <Card>
         <SectionHeader title="Pending Advisory Cases" subtitle={`${pending.length} cases waiting`} />
+        <div className="mb-3">
+          <input
+            className="input-field"
+            placeholder="Search by case ID, farmer, district, crop, or symptoms..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
         <div className={`${compact ? 'max-h-[520px]' : 'max-h-[620px]'} overflow-y-auto space-y-3`}>
-          {pending.length === 0 && (
+          {filteredPending.length === 0 && (
             <div className="text-center py-10 text-gray-400 text-sm">No pending cases right now.</div>
           )}
-          {pending.map((c) => (
+          {filteredPending.map((c) => (
             <div
               key={c.id}
               className={`p-4 rounded-xl border cursor-pointer transition-all ${activeCase?.id === c.id ? 'border-forest bg-forest/5' : 'border-gray-100 hover:border-forest/30 hover:bg-gray-50'}`}

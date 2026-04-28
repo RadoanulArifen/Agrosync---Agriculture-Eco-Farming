@@ -11,7 +11,7 @@ interface UseRoleUserContextOptions {
 
 export function useRoleUserContext({ role, fallbackUser }: UseRoleUserContextOptions) {
   const resolveUser = () => {
-    const currentUser = authService.getCurrentUser();
+    const currentUser = authService.getCurrentUser(role);
     return currentUser?.role === role ? currentUser : fallbackUser;
   };
 
@@ -41,7 +41,7 @@ export function useRoleUserContext({ role, fallbackUser }: UseRoleUserContextOpt
     syncNotificationCount();
 
     const handleStorage = (event: StorageEvent) => {
-      if (event.key && !['ams_notifications', 'ams_role_users', 'ams_current_role_user_id'].includes(event.key)) return;
+      if (event.key && !['ams_notifications', 'ams_notifications_sync', 'ams_role_users', 'ams_current_role_user_id', 'ams_current_role_user_ids_by_role'].includes(event.key)) return;
       syncNotificationCount();
     };
 

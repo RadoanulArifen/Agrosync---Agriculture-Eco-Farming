@@ -64,6 +64,8 @@ const getPaymentLabel = (order: Order) => {
 export default function FarmerOrdersPage() {
   const { farmer, unreadNotifications, loading } = useFarmerContext();
   const [orders, setOrders] = useState<Order[]>([]);
+  const [message, setMessage] = useState('');
+  const [processingOrderId, setProcessingOrderId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!farmer) return undefined;
@@ -95,6 +97,22 @@ export default function FarmerOrdersPage() {
     };
   }, [farmer]);
 
+  const handleConfirmDelivery = async (orderId: string) => {
+    if (!farmer) return;
+    setProcessingOrderId(orderId);
+    const result = await orderService.updateOrderStatus(orderId, 'delivered');
+    setProcessingOrderId(null);
+
+    if (!result.success) {
+      setMessage('Could not update delivery status. Please try again.');
+      return;
+    }
+
+    setMessage('Delivery status updated successfully.');
+    const nextOrders = await orderService.getOrders(farmer.id);
+    setOrders(nextOrders);
+  };
+
   useEffect(() => {
     const handleOrderRefresh = () => {
       if (!farmer) return;
@@ -120,11 +138,17 @@ export default function FarmerOrdersPage() {
 
   return (
     <DashboardShell navItems={FARMER_NAV_ITEMS} role="farmer" userName={farmer.name} userSubtitle={`FID: ${farmer.fid}`} notificationCount={unreadNotifications}>
-      <PageHeader title="My Orders" subtitle="Review order items, payment details, and delivery tracking" />
+      <PageHeader title="My Orders Tracking" subtitle="Review marketplace order items, payment details, and delivery tracking" />
+
+      {message && (
+        <Card className="mb-4 border-green-200 bg-green-50">
+          <div className="text-sm text-green-700">{message}</div>
+        </Card>
+      )}
 
       {orders.length === 0 ? (
         <Card>
-          <EmptyState icon={Package} title="No orders yet" description="Your marketplace orders will appear here." />
+          <EmptyState icon={Package} title="No marketplace orders yet" description="Orders from the marketplace will appear here." />
         </Card>
       ) : (
         <div className="space-y-4">
@@ -207,6 +231,19 @@ export default function FarmerOrdersPage() {
                       <div>Delivered on {formatDate(order.deliveredAt)}</div>
                     )}
                   </div>
+
+                  {order.status === 'dispatched' && (
+                    <div className="mt-4">
+                      <button
+                        type="button"
+                        disabled={processingOrderId === order.id}
+                        onClick={() => handleConfirmDelivery(order.id)}
+                        className="btn-success px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {processingOrderId === order.id ? 'Updating...' : 'Confirm Delivered'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </Card>
             );
