@@ -123,5 +123,7 @@ class DatabaseSeeder extends Seeder
             ['id' => 'audit_001', 'entity' => 'tenant', 'action' => 'create', 'actor' => 'Super Admin', 'details' => 'Created Mymensingh Farmers Cooperative tenant.', 'created_at' => '2026-04-20 09:00:00', 'updated_at' => $now],
             ['id' => 'audit_002', 'entity' => 'case', 'action' => 'reassign', 'actor' => 'Super Admin', 'details' => 'Reassigned advisory case ADV-2026-0000003 to Nasrin Akter.', 'created_at' => '2026-04-21 11:20:00', 'updated_at' => $now],
         ]), ['id']);
+
+        $this->call(BulkDemoDataSeeder::class);
     }
 }

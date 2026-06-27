@@ -13,6 +13,7 @@ export const FARMER_NAV_ITEMS: NavItem[] = [
   { href: '/dashboard/farmer', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/dashboard/farmer/advisory', label: 'Crop Advisory', icon: MessageSquare },
   { href: '/dashboard/farmer/marketplace', label: 'Marketplace', icon: ShoppingCart },
+  { href: '/dashboard/farmer/cart', label: 'Cart', icon: ShoppingCart },
   { href: '/dashboard/farmer/crop-listings', label: 'My Crop Listings', icon: Wheat },
   { href: '/dashboard/farmer/deals', label: 'Deals', icon: Handshake },
   { href: '/dashboard/farmer/sales-orders', label: 'Sales Orders', icon: Package },

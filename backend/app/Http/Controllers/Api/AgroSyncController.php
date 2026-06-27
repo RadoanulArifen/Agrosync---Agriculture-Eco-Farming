@@ -131,6 +131,101 @@ class AgroSyncController extends Controller
         ];
     }
 
+    private function localWeatherForecast(array $location): array
+    {
+        $district = $location['district'] ?: 'Dhaka';
+        $forecast = DB::table('weather_forecasts')
+            ->where('district', $district)
+            ->where('forecast_date', '>=', now()->toDateString())
+            ->orderBy('forecast_date')
+            ->limit(7)
+            ->get();
+
+        if ($forecast->isEmpty()) {
+            $forecast = DB::table('weather_forecasts')
+                ->orderBy('forecast_date')
+                ->limit(7)
+                ->get();
+        }
+
+        if ($forecast->isEmpty()) {
+            $forecast = collect(range(0, 6))->map(fn (int $offset) => (object) [
+                'district' => $district,
+                'forecast_date' => now()->addDays($offset)->toDateString(),
+                'temp_min' => 22,
+                'temp_max' => 31,
+                'rainfall' => 5,
+                'humidity' => 70,
+                'wind_speed' => 10,
+                'condition' => 'Clear Sky',
+                'icon' => 'sun',
+                'advisory' => 'Good conditions for routine field work. Keep monitoring humidity before spraying.',
+            ]);
+        }
+
+        $days = $forecast->map(fn (object $day) => [
+            'district' => $district,
+            'date' => (string) $day->forecast_date,
+            'tempMin' => (int) $day->temp_min,
+            'tempMax' => (int) $day->temp_max,
+            'rainfall' => (int) $day->rainfall,
+            'humidity' => (int) $day->humidity,
+            'windSpeed' => (int) $day->wind_speed,
+            'condition' => (string) $day->condition,
+            'icon' => (string) ($day->icon ?: $this->weatherEmoji((string) $day->condition)),
+            'advisory' => (string) ($day->advisory ?: $this->weatherAdvisory((float) $day->rainfall, (float) $day->wind_speed, (float) $day->temp_max, (string) $day->condition)),
+        ])->values();
+
+        $current = $days->first();
+
+        return [
+            'location' => $district.', Bangladesh',
+            'district' => $district,
+            'current' => $current,
+            'forecast' => $days,
+            'alerts' => $days
+                ->filter(fn (array $day) => $day['rainfall'] >= 25 || $day['windSpeed'] >= 35 || $day['tempMax'] >= 36 || str_contains(strtolower($day['condition']), 'thunder'))
+                ->map(fn (array $day) => "{$day['condition']} expected on {$day['date']}. {$day['advisory']}")
+                ->values()
+                ->all(),
+        ];
+    }
+
+    private function cartIdForFarmer(string $farmerId): string
+    {
+        $existingCartId = DB::table('carts')->where('farmer_id', $farmerId)->value('id');
+        if ($existingCartId) {
+            return (string) $existingCartId;
+        }
+
+        $cartId = 'cart_'.$farmerId;
+        DB::table('carts')->insert([
+            'id' => $cartId,
+            'farmer_id' => $farmerId,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        return $cartId;
+    }
+
+    private function userByPublicOrRoleId(string $id): ?object
+    {
+        $user = DB::table('users')->where('public_id', $id)->first();
+        if ($user) {
+            return $user;
+        }
+
+        foreach (['farmers', 'officers', 'vendors', 'companies'] as $table) {
+            $roleUserId = DB::table($table)->where('id', $id)->value('user_id');
+            if ($roleUserId) {
+                return DB::table('users')->where('public_id', $roleUserId)->first();
+            }
+        }
+
+        return null;
+    }
+
     private function generateAndSendOtp(object $recipient, string $purpose = 'login'): array
     {
         $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
@@ -222,14 +317,19 @@ class AgroSyncController extends Controller
     private function user(object $user): array
     {
         $roleRows = [
-            'farmer' => DB::table('farmers')->where('user_id', $user->public_id)->first(),
-            'officer' => DB::table('officers')->where('user_id', $user->public_id)->first(),
-            'vendor' => DB::table('vendors')->where('user_id', $user->public_id)->first(),
-            'company' => DB::table('companies')->where('user_id', $user->public_id)->first(),
+            'farmer' => null,
+            'officer' => null,
+            'vendor' => null,
+            'company' => null,
         ];
+        if (array_key_exists((string) $user->role, $roleRows)) {
+            $roleRows[$user->role] = DB::table(Str::plural((string) $user->role))->where('user_id', $user->public_id)->first();
+        }
+        $roleRecord = $roleRows[$user->role] ?? null;
 
         $payload = [
-            'id' => $user->public_id,
+            'id' => $roleRecord?->id ?? $user->public_id,
+            'userId' => $user->public_id,
             'name' => $user->name,
             'nameBn' => $user->name_bn,
             'email' => $user->email,
@@ -430,7 +530,7 @@ class AgroSyncController extends Controller
 
     public function updateUserProfile(Request $request, string $userId): JsonResponse
     {
-        $user = DB::table('users')->where('public_id', $userId)->first();
+        $user = $this->userByPublicOrRoleId($userId);
 
         if (! $user) {
             return $this->fail('User not found.', 404);
@@ -503,7 +603,7 @@ class AgroSyncController extends Controller
             }
         });
 
-        $updatedUser = DB::table('users')->where('public_id', $userId)->first();
+        $updatedUser = DB::table('users')->where('public_id', $user->public_id)->first();
 
         return $this->ok([
             'success' => true,
@@ -572,12 +672,11 @@ class AgroSyncController extends Controller
     public function weatherForecast(Request $request): JsonResponse
     {
         $apiKey = env('WEATHER_API_KEY');
+        $location = $this->weatherLocation($request);
 
         if (! $apiKey) {
-            return $this->fail('Weather API key is not configured.', 500);
+            return $this->ok($this->localWeatherForecast($location));
         }
-
-        $location = $this->weatherLocation($request);
 
         try {
             $response = Http::timeout(15)->get('https://api.weatherapi.com/v1/forecast.json', [
@@ -670,7 +769,7 @@ class AgroSyncController extends Controller
                 'alerts' => $alerts,
             ]);
         } catch (Throwable) {
-            return $this->fail('Unable to load weather forecast right now.', 500);
+            return $this->ok($this->localWeatherForecast($location));
         }
     }
 
@@ -891,7 +990,7 @@ class AgroSyncController extends Controller
         $farmers = DB::table('farmers')
             ->when($request->filled('q'), function ($query) use ($request) {
                 $q = '%'.strtolower($request->input('q')).'%';
-                $query->whereRaw('lower(name_en) like ? or lower(fid) like ? or lower(district) like ?', [$q, $q, $q]);
+                $query->whereRaw('lower(id) like ? or lower(user_id) like ? or lower(name_en) like ? or lower(fid) like ? or lower(district) like ?', [$q, $q, $q, $q, $q]);
             })
             ->orderByDesc('created_at')
             ->get()
@@ -1039,24 +1138,30 @@ class AgroSyncController extends Controller
 
     public function regionalAdvisoryStats(Request $request): JsonResponse
     {
-        $stats = DB::table('advisory_cases')
+        $regionalCases = DB::table('advisory_cases')
             ->whereNotIn('advisory_cases.id', $this->demoAdvisoryCaseIds())
             ->join('farmers', 'advisory_cases.farmer_id', '=', 'farmers.id')
-            ->whereRaw("COALESCE(NULLIF(advisory_cases.farmer_district, ''), farmers.district) is not null")
-            ->whereRaw("COALESCE(NULLIF(advisory_cases.farmer_district, ''), farmers.district) != ''")
             ->select(
+                'advisory_cases.id',
+                'advisory_cases.status',
                 DB::raw("COALESCE(NULLIF(advisory_cases.farmer_division, ''), farmers.division) as division"),
-                DB::raw("COALESCE(NULLIF(advisory_cases.farmer_district, ''), farmers.district) as district"),
-                DB::raw('COUNT(advisory_cases.id) as count'),
-                DB::raw("SUM(CASE WHEN advisory_cases.status = 'pending' THEN 1 ELSE 0 END) as pending_count"),
-                DB::raw("SUM(CASE WHEN advisory_cases.status = 'responded' THEN 1 ELSE 0 END) as responded_count"),
-                DB::raw("SUM(CASE WHEN advisory_cases.status IN ('resolved', 'closed') THEN 1 ELSE 0 END) as resolved_count")
+                DB::raw("COALESCE(NULLIF(advisory_cases.farmer_district, ''), farmers.district) as district")
+            );
+
+        $stats = DB::query()
+            ->fromSub($regionalCases, 'regional_cases')
+            ->whereNotNull('district')
+            ->where('district', '!=', '')
+            ->select(
+                'division',
+                'district',
+                DB::raw('COUNT(id) as count'),
+                DB::raw("SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count"),
+                DB::raw("SUM(CASE WHEN status = 'responded' THEN 1 ELSE 0 END) as responded_count"),
+                DB::raw("SUM(CASE WHEN status IN ('resolved', 'closed') THEN 1 ELSE 0 END) as resolved_count")
             )
-            ->groupBy(
-                DB::raw("COALESCE(NULLIF(advisory_cases.farmer_division, ''), farmers.division)"),
-                DB::raw("COALESCE(NULLIF(advisory_cases.farmer_district, ''), farmers.district)")
-            )
-            ->orderByDesc(DB::raw('COUNT(advisory_cases.id)'))
+            ->groupBy('division', 'district')
+            ->orderByDesc(DB::raw('COUNT(id)'))
             ->get()
             ->map(fn ($row) => [
                 'division' => $row->division,
@@ -1170,9 +1275,7 @@ class AgroSyncController extends Controller
 
     public function cart(string $farmerId): JsonResponse
     {
-        $cartId = 'cart_'.$farmerId;
-        DB::table('carts')->updateOrInsert(['id' => $cartId], 
-        ['farmer_id' => $farmerId, 'updated_at' => now(), 'created_at' => now()]);
+        $cartId = $this->cartIdForFarmer($farmerId);
 
         $items = DB::table('cart_items')
             ->where('cart_id', $cartId)
@@ -1190,8 +1293,7 @@ class AgroSyncController extends Controller
 
     public function addToCart(Request $request, string $farmerId): JsonResponse
     {
-        $cartId = 'cart_'.$farmerId;
-        DB::table('carts')->updateOrInsert(['id' => $cartId], ['farmer_id' => $farmerId, 'updated_at' => now(), 'created_at' => now()]);
+        $cartId = $this->cartIdForFarmer($farmerId);
         $existing = DB::table('cart_items')->where('cart_id', $cartId)->where('product_id', $request->input('productId'))->first();
 
         DB::table('cart_items')->updateOrInsert(
@@ -1204,7 +1306,7 @@ class AgroSyncController extends Controller
 
     public function updateCartItem(Request $request, string $farmerId, string $productId): JsonResponse
     {
-        $cartId = 'cart_'.$farmerId;
+        $cartId = $this->cartIdForFarmer($farmerId);
         if ((int) $request->input('quantity') <= 0) {
             DB::table('cart_items')->where('cart_id', $cartId)->where('product_id', $productId)->delete();
         } else {
@@ -1216,7 +1318,7 @@ class AgroSyncController extends Controller
 
     public function clearCart(string $farmerId): JsonResponse
     {
-        DB::table('cart_items')->where('cart_id', 'cart_'.$farmerId)->delete();
+        DB::table('cart_items')->where('cart_id', $this->cartIdForFarmer($farmerId))->delete();
 
         return $this->ok(['success' => true]);
     }
@@ -1296,7 +1398,7 @@ class AgroSyncController extends Controller
                 DB::table('products')->where('id', $entry['product']->id)->decrement('stock_qty', min((int) $entry['product']->stock_qty, (int) $entry['item']['quantity']));
             }
 
-            DB::table('cart_items')->where('cart_id', 'cart_'.$farmer->id)->delete();
+            DB::table('cart_items')->where('cart_id', $this->cartIdForFarmer((string) $farmer->id))->delete();
         });
 
         $this->createNotification($farmer->id, 'order', 'Order Placed Successfully', "Order {$orderId} has been placed.", ['push', 'sms']);
@@ -3044,7 +3146,7 @@ HTML;
 
     public function changePassword(Request $request, string $userId): JsonResponse
     {
-        $user = DB::table('users')->where('public_id', $userId)->first();
+        $user = $this->userByPublicOrRoleId($userId);
 
         if (! $user) {
             return $this->fail('User not found.', 404);
@@ -3077,7 +3179,7 @@ HTML;
 
     public function deleteUserAccount(string $userId): JsonResponse
     {
-        $user = DB::table('users')->where('public_id', $userId)->first();
+        $user = $this->userByPublicOrRoleId($userId);
 
         if (! $user) {
             return $this->fail('User not found.', 404);
